@@ -1,0 +1,128 @@
+openapi: "3.1.0"
+info:
+  title: Adversarial — Circular / Recursive Refs
+  version: "1.0.0"
+  description: >
+    Spec with recursive schema references (a tree node that contains children
+    of its own type). specmcp must not infinite-loop during schema traversal
+    in the Normalize and Simplify stages.
+    prance resolves $ref pointers; circular references are replaced with
+    an empty object sentinel to break the cycle.
+
+servers:
+  - url: https://api.example.com/v1
+
+paths:
+  /nodes:
+    get:
+      operationId: listNodes
+      summary: List root nodes
+      responses:
+        "200":
+          description: Tree nodes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TreeNode"
+
+    post:
+      operationId: createNode
+      summary: Create a root node
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TreeNodeInput"
+      responses:
+        "201":
+          description: Created node
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TreeNode"
+
+  /nodes/{id}:
+    get:
+      operationId: getNode
+      summary: Get a node and its subtree
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The node
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TreeNode"
+
+  /categories:
+    get:
+      operationId: listCategories
+      summary: List categories (mutually recursive with Tag)
+      responses:
+        "200":
+          description: Categories
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Category"
+
+components:
+  schemas:
+    # Self-referential: a node that can contain children of the same type.
+    TreeNode:
+      type: object
+      properties:
+        id:
+          type: string
+          readOnly: true
+        label:
+          type: string
+        children:
+          type: array
+          items:
+            $ref: "#/components/schemas/TreeNode"
+
+    TreeNodeInput:
+      type: object
+      required: [label]
+      properties:
+        label:
+          type: string
+        # Input also allows nested children (for bulk-create)
+        children:
+          type: array
+          items:
+            $ref: "#/components/schemas/TreeNodeInput"
+
+    # Mutually recursive: Category ↔ Tag
+    Category:
+      type: object
+      properties:
+        id:
+          type: string
+          readOnly: true
+        name:
+          type: string
+        primary_tag:
+          $ref: "#/components/schemas/Tag"
+
+    Tag:
+      type: object
+      properties:
+        id:
+          type: string
+          readOnly: true
+        label:
+          type: string
+        category:
+          $ref: "#/components/schemas/Category"

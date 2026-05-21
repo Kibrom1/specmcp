@@ -1,0 +1,293 @@
+openapi: "3.1.0"
+info:
+  title: Adversarial — Deep allOf / anyOf / oneOf
+  version: "1.0.0"
+  description: >
+    Spec that exercises deep schema composition: multi-level allOf inheritance,
+    anyOf/oneOf discriminators, nullable variants (3.0-style and 3.1-style),
+    and mixed required/optional fields spread across multiple allOf branches.
+    The Simplify stage must handle these without crashing or producing
+    an empty or incorrect input schema.
+
+servers:
+  - url: https://api.example.com/v1
+
+paths:
+  /events:
+    get:
+      operationId: listEvents
+      summary: List events (returns a polymorphic list)
+      parameters:
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [click, view, purchase]
+      responses:
+        "200":
+          description: Events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Event"
+
+    post:
+      operationId: createEvent
+      summary: Create an event
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EventInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Event"
+
+  /widgets:
+    post:
+      operationId: createWidget
+      summary: Create a widget (body uses deep allOf inheritance)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SpecialWidget"
+      responses:
+        "201":
+          description: Created widget
+
+  /search:
+    post:
+      operationId: search
+      summary: Polymorphic search (oneOf input variants)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/TextSearch"
+                - $ref: "#/components/schemas/VectorSearch"
+              discriminator:
+                propertyName: kind
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hits:
+                    type: integer
+                  results:
+                    type: array
+                    items:
+                      type: object
+
+  /nullable-demo:
+    get:
+      operationId: nullableDemo
+      summary: Endpoint with nullable response fields (3.0 and 3.1 style)
+      parameters:
+        - name: id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: include_meta
+          in: query
+          schema:
+            # 3.1-style nullable: type array
+            type: ["boolean", "null"]
+      responses:
+        "200":
+          description: Nullable demo response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NullableRecord"
+
+components:
+  schemas:
+    # --- Base types ---
+
+    Timestamped:
+      type: object
+      required: [created_at, updated_at]
+      properties:
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    Identifiable:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          readOnly: true
+
+    # --- allOf chain: Identifiable → Timestamped → BaseWidget → SpecialWidget ---
+
+    BaseWidget:
+      allOf:
+        - $ref: "#/components/schemas/Identifiable"
+        - $ref: "#/components/schemas/Timestamped"
+        - type: object
+          required: [name]
+          properties:
+            name:
+              type: string
+            description:
+              type: string
+
+    SpecialWidget:
+      allOf:
+        - $ref: "#/components/schemas/BaseWidget"
+        - type: object
+          required: [color, priority]
+          properties:
+            color:
+              type: string
+              enum: [red, green, blue]
+            priority:
+              type: integer
+              minimum: 1
+              maximum: 10
+            tags:
+              type: array
+              items:
+                type: string
+
+    # --- Polymorphic events via anyOf ---
+
+    BaseEvent:
+      type: object
+      required: [kind, timestamp]
+      properties:
+        kind:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    ClickEvent:
+      allOf:
+        - $ref: "#/components/schemas/BaseEvent"
+        - type: object
+          properties:
+            element_id:
+              type: string
+            x:
+              type: number
+            y:
+              type: number
+
+    ViewEvent:
+      allOf:
+        - $ref: "#/components/schemas/BaseEvent"
+        - type: object
+          properties:
+            url:
+              type: string
+            duration_ms:
+              type: integer
+
+    PurchaseEvent:
+      allOf:
+        - $ref: "#/components/schemas/BaseEvent"
+        - type: object
+          properties:
+            amount:
+              type: number
+            currency:
+              type: string
+            items:
+              type: array
+              items:
+                type: object
+                properties:
+                  sku:
+                    type: string
+                  qty:
+                    type: integer
+
+    Event:
+      anyOf:
+        - $ref: "#/components/schemas/ClickEvent"
+        - $ref: "#/components/schemas/ViewEvent"
+        - $ref: "#/components/schemas/PurchaseEvent"
+      discriminator:
+        propertyName: kind
+        mapping:
+          click: "#/components/schemas/ClickEvent"
+          view: "#/components/schemas/ViewEvent"
+          purchase: "#/components/schemas/PurchaseEvent"
+
+    EventInput:
+      anyOf:
+        - $ref: "#/components/schemas/ClickEvent"
+        - $ref: "#/components/schemas/ViewEvent"
+        - $ref: "#/components/schemas/PurchaseEvent"
+      discriminator:
+        propertyName: kind
+
+    # --- oneOf search variants ---
+
+    TextSearch:
+      type: object
+      required: [kind, query]
+      properties:
+        kind:
+          type: string
+          enum: [text]
+        query:
+          type: string
+        max_results:
+          type: integer
+          default: 10
+
+    VectorSearch:
+      type: object
+      required: [kind, vector]
+      properties:
+        kind:
+          type: string
+          enum: [vector]
+        vector:
+          type: array
+          items:
+            type: number
+        top_k:
+          type: integer
+          default: 5
+
+    # --- Nullable fields (3.1 style) ---
+
+    NullableRecord:
+      type: object
+      properties:
+        id:
+          type: string
+        value:
+          # 3.1-style: type is an array including "null"
+          type: [string, "null"]
+        score:
+          type: ["number", "null"]
+        metadata:
+          type: ["object", "null"]
+          additionalProperties: true

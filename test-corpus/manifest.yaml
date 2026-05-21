@@ -1,0 +1,89 @@
+# specmcp test corpus manifest
+# Schema:
+#   - id: short unique identifier
+#     url: canonical download URL for the OpenAPI spec
+#     sha256: expected SHA-256 of the downloaded file (hex string)
+#     license: SPDX expression or prose description
+#     vendor: true if the spec is vendored in this repo (permissive license only)
+#     vendor_path: path relative to test-corpus/ (only if vendor: true)
+#     min_success_rate: per-spec floor (overrides global 80% if lower is acceptable)
+#     tags: list of notable characteristics for filtering / reporting
+
+specs:
+  - id: petstore
+    url: https://petstore3.swagger.io/api/v3/openapi.json
+    sha256: ""  # populated by CI fetch job
+    license: Apache-2.0
+    vendor: true
+    vendor_path: petstore.json
+    tags: [simple, reference]
+
+  - id: jsonplaceholder
+    url: https://raw.githubusercontent.com/typicode/json-server/master/README.md
+    sha256: ""
+    license: MIT
+    vendor: true
+    vendor_path: jsonplaceholder.json
+    tags: [simple, crud]
+
+  - id: stripe
+    url: https://raw.githubusercontent.com/stripe/openapi/master/openapi/spec3.json
+    sha256: ""
+    license: "See https://github.com/stripe/openapi — not redistributable; fetched only"
+    vendor: false
+    tags: [large, deep-object, complex-auth, performance-benchmark]
+
+  - id: github
+    url: https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json
+    sha256: ""
+    license: "See https://github.com/github/rest-api-description — fetched only"
+    vendor: false
+    tags: [very-large, naming-collisions]
+
+  - id: linear
+    # NOTE: Linear does not publish an official OpenAPI spec. The GraphQL schema
+    # is not usable here. This entry is a placeholder — replace the url with a
+    # valid OpenAPI 3.x spec URL when one becomes available, or remove the entry.
+    url: ""
+    sha256: ""
+    license: MIT
+    vendor: false
+    tags: [medium, saas, skip]
+
+  - id: digitalocean
+    url: https://api-engineering.nyc3.cdn.digitaloceanspaces.com/spec-ci/DigitalOcean-public.v2.yaml
+    sha256: ""
+    license: "DigitalOcean API spec — fetched only"
+    vendor: false
+    tags: [polymorphism, anyof, oneof]
+
+  - id: slack
+    url: https://raw.githubusercontent.com/slackapi/slack-api-specs/master/web-api/slack_web_openapi_v2.json
+    sha256: ""
+    license: MIT
+    vendor: false
+    tags: [mixed-auth, large]
+
+  - id: adversarial-missing-operationid
+    url: ""
+    sha256: ""
+    license: internal
+    vendor: true
+    vendor_path: adversarial/missing-operationid.yaml
+    tags: [adversarial, naming]
+
+  - id: adversarial-circular-refs
+    url: ""
+    sha256: ""
+    license: internal
+    vendor: true
+    vendor_path: adversarial/circular-refs.yaml
+    tags: [adversarial, refs]
+
+  - id: adversarial-deep-allof
+    url: ""
+    sha256: ""
+    license: internal
+    vendor: true
+    vendor_path: adversarial/deep-allof.yaml
+    tags: [adversarial, simplify]

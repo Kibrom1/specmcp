@@ -1,0 +1,133 @@
+# serializer version: 1
+# name: test_inspect_json_snapshot
+  '''
+  {
+    "fallback_count": 0,
+    "openapi_version": "3.0",
+    "spec": "test-corpus/petstore.json",
+    "tool_count": 4,
+    "tools": [
+      {
+        "auth_schemes": [
+          "petstoreApiKey"
+        ],
+        "deprecated": false,
+        "description": "Create a pet [POST /pets]",
+        "input_schema": {
+          "additionalProperties": true,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "tag": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        "method": "POST",
+        "name": "createPet",
+        "operation_id": "createPet",
+        "path": "/pets",
+        "server_url": "https://petstore.example.com/v1",
+        "tags": [
+          "pets"
+        ],
+        "warnings": []
+      },
+      {
+        "auth_schemes": [
+          "petstoreApiKey"
+        ],
+        "deprecated": false,
+        "description": "Delete a pet [DELETE /pets/{petId}]",
+        "input_schema": {
+          "additionalProperties": true,
+          "properties": {
+            "petId": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "petId"
+          ],
+          "type": "object"
+        },
+        "method": "DELETE",
+        "name": "deletePet",
+        "operation_id": "deletePet",
+        "path": "/pets/{petId}",
+        "server_url": "https://petstore.example.com/v1",
+        "tags": [
+          "pets"
+        ],
+        "warnings": []
+      },
+      {
+        "auth_schemes": [
+          "petstoreApiKey"
+        ],
+        "deprecated": false,
+        "description": "Get a pet by ID [GET /pets/{petId}]",
+        "input_schema": {
+          "additionalProperties": true,
+          "properties": {
+            "petId": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "verbose": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "petId"
+          ],
+          "type": "object"
+        },
+        "method": "GET",
+        "name": "getPetById",
+        "operation_id": "getPetById",
+        "path": "/pets/{petId}",
+        "server_url": "https://petstore.example.com/v1",
+        "tags": [
+          "pets"
+        ],
+        "warnings": []
+      },
+      {
+        "auth_schemes": [
+          "petstoreApiKey"
+        ],
+        "deprecated": false,
+        "description": "List all pets [GET /pets]",
+        "input_schema": {
+          "additionalProperties": true,
+          "properties": {
+            "limit": {
+              "maximum": 100,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "method": "GET",
+        "name": "listPets",
+        "operation_id": "listPets",
+        "path": "/pets",
+        "server_url": "https://petstore.example.com/v1",
+        "tags": [
+          "pets"
+        ],
+        "warnings": []
+      }
+    ],
+    "warning_count": 0
+  }
+  '''
+# ---
