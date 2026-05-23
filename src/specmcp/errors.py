@@ -214,6 +214,34 @@ class AuthConfigError(AuthError):
     code = "runtime.auth_config_error"
 
 
+class AuthRequiredError(AuthError):
+    """No OAuth token exists for this session; user must authenticate via login URL.
+
+    Raised by the auth layer when an Authorization Code flow operation is called
+    but the session has no valid token. The dispatcher catches this and returns
+    an actionable message to the LLM containing the single-use login URL.
+
+    The nonce (not the session_id) is included in the login URL. The session_id
+    is never surfaced to the LLM.
+    """
+
+    code = "runtime.auth_required"
+
+    def __init__(
+        self,
+        message: str = "Authentication required",
+        *,
+        session_id: str | None = None,
+        login_url: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.session_id = session_id
+        self.login_url = login_url
+        if login_url:
+            self.context["login_url"] = login_url
+
+
 class TokenRefreshError(AuthError):
     """OAuth token endpoint request failed or returned an unexpected response.
 
@@ -346,6 +374,7 @@ def exit_code_for(exc: SpecmcpError) -> int:
 #: ``{exc}`` is substituted with str(exc); ``{request_id}`` with exc.request_id.
 MCP_ERROR_CONTENT: dict[type[SpecmcpError], str] = {
     ArgumentValidationError: "Invalid argument: {exc}",
+    AuthRequiredError:       "Authentication required. Please ask the user to visit the following URL to log in:\n{exc.login_url}\n\nThe link expires in 5 minutes. After logging in, retry your request.",
     UpstreamClientError:     "Upstream returned HTTP {exc.status_code}: {exc.message}",
     UpstreamServerError:     "Upstream service error (request_id: {request_id})",
     TransientError:          "Network error (request_id: {request_id}). This may be transient.",

@@ -38,6 +38,7 @@ from specmcp.core.expose import ToolDefinition
 from specmcp.core.model import ArgumentBinding, Operation
 from specmcp.errors import DispatchError, ResponseTooLargeError
 from specmcp.runtime.http_client import HttpClient, HttpResponse
+from specmcp.runtime.session import SessionContext
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +55,7 @@ async def dispatch(
     dispatch_config: DispatchConfig,
     operation_override: OperationOverride | None = None,
     request_id: str | None = None,
+    session: SessionContext | None = None,
 ) -> list[dict[str, Any]]:
     """Dispatch a tool call to the upstream API.
 
@@ -163,6 +165,7 @@ async def dispatch(
         op.auth,
         headers=req_headers,
         params=query_params,
+        session=session,
     )
 
     # 8. Timeout / retry from override or global config

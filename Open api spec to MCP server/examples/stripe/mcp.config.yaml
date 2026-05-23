@@ -1,0 +1,107 @@
+# specmcp example — Stripe API
+# Exposes payment and customer management tools for LLM agents.
+# Full spec: https://raw.githubusercontent.com/stripe/openapi/master/openapi/spec3.json
+#
+# Run: specmcp serve --config examples/stripe/mcp.config.yaml
+version: "1"
+
+spec:
+  source: "https://raw.githubusercontent.com/stripe/openapi/master/openapi/spec3.json"
+
+auth:
+  basicAuth:
+    type: bearer
+    value_from: env(STRIPE_SECRET_KEY)
+
+server:
+  # Expose read operations + safe write operations.
+  # Exclude destructive operations (refunds, deletes) by default.
+  include_operations:
+    - GetCustomers
+    - PostCustomers
+    - GetCustomersCustomer
+    - PostCustomersCustomer
+    - GetPaymentIntents
+    - PostPaymentIntents
+    - GetPaymentIntentsIntent
+    - GetInvoices
+    - GetInvoicesInvoice
+    - GetSubscriptions
+    - GetSubscriptionsSubscription
+    - GetProducts
+    - GetProductsId
+    - GetPrices
+    - GetPricesPrice
+    - GetBalanceTransactions
+    - GetCharges
+    - GetChargesCharge
+
+dispatch:
+  default_timeout_seconds: 30
+  response_size_limit_bytes: 524288   # 512 KiB
+  text_truncate_bytes: 131072         # 128 KiB
+  tls_verify: true
+
+simplify:
+  truncate_description_chars: 400
+  drop_spec_metadata: true
+  flatten_single_property_wrappers: true
+
+operations:
+  GetCustomers:
+    rename: list_customers
+    description: "List Stripe customers. Filter by email or search query."
+  PostCustomers:
+    rename: create_customer
+    description: "Create a new Stripe customer."
+  GetCustomersCustomer:
+    rename: get_customer
+    description: "Get a Stripe customer by ID."
+  PostCustomersCustomer:
+    rename: update_customer
+    description: "Update a Stripe customer's details."
+  GetPaymentIntents:
+    rename: list_payment_intents
+    description: "List PaymentIntents. Filter by customer or status."
+  PostPaymentIntents:
+    rename: create_payment_intent
+    description: "Create a PaymentIntent to start a payment flow."
+  GetPaymentIntentsIntent:
+    rename: get_payment_intent
+    description: "Get a PaymentIntent by ID."
+  GetInvoices:
+    rename: list_invoices
+    description: "List invoices. Filter by customer or status."
+  GetInvoicesInvoice:
+    rename: get_invoice
+    description: "Get an invoice by ID."
+  GetSubscriptions:
+    rename: list_subscriptions
+    description: "List subscriptions. Filter by customer or status."
+  GetSubscriptionsSubscription:
+    rename: get_subscription
+    description: "Get a subscription by ID."
+  GetProducts:
+    rename: list_products
+    description: "List Stripe products."
+  GetProductsId:
+    rename: get_product
+    description: "Get a product by ID."
+  GetPrices:
+    rename: list_prices
+    description: "List prices for products."
+  GetPricesPrice:
+    rename: get_price
+    description: "Get a price by ID."
+  GetBalanceTransactions:
+    rename: list_balance_transactions
+    description: "List balance transactions (payouts, charges, refunds)."
+  GetCharges:
+    rename: list_charges
+    description: "List charges."
+  GetChargesCharge:
+    rename: get_charge
+    description: "Get a charge by ID."
+
+transport:
+  default: stdio

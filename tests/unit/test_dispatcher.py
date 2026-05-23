@@ -509,3 +509,65 @@ async def test_dispatch_invalid_args_raises_argument_validation_error():
 
     # HTTP client must not have been called
     client.request.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Session passthrough (Phase 1 plumbing — no behaviour change)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatch_session_none_no_regression():
+    """dispatch() with session=None is identical to not passing session (v1 behaviour)."""
+    from specmcp.runtime.session import SessionContext
+
+    op = _make_op(path="/pets/{petId}")
+    arg_map = ArgumentMap(bindings={
+        "petId": ArgumentBinding(
+            source_llm_key="petId",
+            target_kind="path",
+            target_path=["petId"],
+        )
+    })
+    tool = _make_tool(op, arg_map)
+    client = _mock_http_client(_fake_http_response())
+
+    result = await dispatch(
+        tool=tool,
+        llm_args={"petId": 1},
+        http_client=client,
+        auth_injector=_no_auth_injector(),
+        dispatch_config=_dispatch_cfg(),
+        session=None,
+    )
+    assert result[0]["text"].strip()  # non-empty result
+    client.request.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_session_context_passed_without_error():
+    """dispatch() accepts a SessionContext without breaking existing behaviour."""
+    from specmcp.runtime.session import SessionContext
+
+    op = _make_op(path="/pets/{petId}")
+    arg_map = ArgumentMap(bindings={
+        "petId": ArgumentBinding(
+            source_llm_key="petId",
+            target_kind="path",
+            target_path=["petId"],
+        )
+    })
+    tool = _make_tool(op, arg_map)
+    client = _mock_http_client(_fake_http_response())
+    session = SessionContext(session_id="test-session-id-1234")
+
+    result = await dispatch(
+        tool=tool,
+        llm_args={"petId": 99},
+        http_client=client,
+        auth_injector=_no_auth_injector(),
+        dispatch_config=_dispatch_cfg(),
+        session=session,
+    )
+    assert result[0]["text"].strip()
+    client.request.assert_called_once()

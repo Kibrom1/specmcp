@@ -1,0 +1,23 @@
+# specmcp example — Petstore API
+# Run: specmcp serve --config examples/petstore/mcp.config.yaml
+version: "1"
+
+spec:
+  source: "test-corpus/petstore.json"
+
+auth:
+  petstoreApiKey:
+    type: apiKey
+    in: header
+    name: X-Api-Key
+    value_from: env(PETSTORE_API_KEY)
+
+dispatch:
+  default_timeout_seconds: 10
+  tls_verify: true
+
+simplify:
+  truncate_description_chars: 300
+
+transport:
+  default: stdio

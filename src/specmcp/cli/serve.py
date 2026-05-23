@@ -39,6 +39,16 @@ from specmcp.errors import (
     is_transient,
 )
 
+# ---------------------------------------------------------------------------
+# Module-level session map
+# ---------------------------------------------------------------------------
+# Maps session_id -> SessionContext for all active sessions.
+# For stdio transport this holds exactly one entry (single session per process).
+# For HTTP transport (Phase 4), one entry per connected client.
+#
+# Import is deferred to avoid circular imports during module load.
+_sessions: dict[str, "Any"] = {}  # dict[str, SessionContext]
+
 
 # ---------------------------------------------------------------------------
 # Pipeline helper (shared by startup and --watch reloader)
@@ -215,9 +225,52 @@ async def _run_server(
     from specmcp.runtime.http_client import HttpClient
     from specmcp.runtime.dispatcher import dispatch as dispatch_tool
     from specmcp.runtime.registry_ref import RegistryRef
+    from specmcp.runtime.session import SessionContext
+    from specmcp.config import SensitiveStr
 
     registry_ref = RegistryRef(registry)
     server = Server("specmcp")
+
+    # For stdio transport, the entire process is one session.
+    # Create a single SessionContext upfront and reuse it for all tool calls.
+    # Phase 4 (HTTP transport) will create one SessionContext per connection.
+    stdio_session_id = str(uuid.uuid4())
+    stdio_session = SessionContext(session_id=stdio_session_id)
+    _sessions[stdio_session_id] = stdio_session
+
+    # Phase 2: lazily populate client_token from the MCP initialize request.
+    # The SDK handles InitializeRequest at the session layer (before messages
+    # reach Server.request_handlers), so we read it via the request_ctx
+    # ContextVar the first time any handler is called.
+    _client_token_read = False
+
+    def _maybe_read_client_token() -> None:
+        """Read bearer_token from initialize._meta on the first handler call.
+
+        MCP clients can pass a bearer token in the initialize request:
+            { "_meta": { "bearer_token": "<token>" } }
+
+        specmcp reads it once and stores it in stdio_session.client_token.
+        When present it takes priority over the env-var token for Bearer auth.
+        The MCP client is responsible for keeping the token fresh.
+        """
+        nonlocal _client_token_read
+        if _client_token_read:
+            return
+        _client_token_read = True
+        try:
+            from mcp.server.lowlevel.server import request_ctx
+            ctx = request_ctx.get()
+            mcp_session = ctx.session
+            params = mcp_session.client_params
+            if params and params.meta:
+                raw_token = params.meta.model_extra.get("bearer_token")
+                if raw_token and isinstance(raw_token, str):
+                    stdio_session.client_token = SensitiveStr(raw_token)
+        except (LookupError, AttributeError):
+            # LookupError: request_ctx not set (test environments)
+            # AttributeError: SDK version quirk — safe to ignore
+            pass
 
     # HttpClient is opened once here and shared across all tool calls so that
     # connection pooling works correctly. Opening a new client per call would
@@ -227,6 +280,7 @@ async def _run_server(
         # --- tools/list handler ---
         @server.list_tools()
         async def handle_list_tools() -> list[mcp_types.Tool]:
+            _maybe_read_client_token()
             reg = registry_ref.get()
             return [
                 mcp_types.Tool(
@@ -243,6 +297,7 @@ async def _run_server(
             name: str,
             arguments: dict[str, Any],
         ) -> list[mcp_types.TextContent]:
+            _maybe_read_client_token()
             request_id = str(uuid.uuid4())[:8]
             reg = registry_ref.get()
 
@@ -268,6 +323,7 @@ async def _run_server(
                     dispatch_config=dispatch_cfg,
                     operation_override=op_override,
                     request_id=request_id,
+                    session=stdio_session,
                 )
                 return [
                     mcp_types.TextContent(type="text", text=block["text"])

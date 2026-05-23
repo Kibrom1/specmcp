@@ -180,7 +180,12 @@ async def test_fetch_token_success():
 @pytest.mark.asyncio
 @respx.mock
 async def test_fetch_token_sends_correct_form_fields():
-    """_fetch_token() must POST grant_type, client_id, client_secret."""
+    """_fetch_token() must POST grant_type via Basic Auth (RFC 6749 §2.3.1).
+
+    Credentials go in the Authorization header, NOT the request body.
+    """
+    import base64
+
     injector = _oauth_injector(client_id="my-id", client_secret="my-secret")
     resolved = injector._schemes["myOAuth"]
     cfg = resolved.config
@@ -194,9 +199,19 @@ async def test_fetch_token_sends_correct_form_fields():
 
     request = route.calls[0].request
     body = dict(pair.split("=") for pair in request.content.decode().split("&"))
+
+    # grant_type must be in the body
     assert body["grant_type"] == "client_credentials"
-    assert body["client_id"] == "my-id"
-    assert body["client_secret"] == "my-secret"
+
+    # client_id and client_secret must NOT be in the body (RFC 6749 §2.3.1)
+    assert "client_id" not in body, "client_id must not appear in POST body"
+    assert "client_secret" not in body, "client_secret must not appear in POST body"
+
+    # Credentials must be in Authorization: Basic header
+    auth_header = request.headers.get("authorization", "")
+    assert auth_header.startswith("Basic "), f"Expected Basic auth, got: {auth_header!r}"
+    decoded = base64.b64decode(auth_header[6:]).decode()
+    assert decoded == "my-id:my-secret"
 
 
 @pytest.mark.asyncio
