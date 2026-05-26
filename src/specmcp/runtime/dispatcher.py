@@ -55,7 +55,7 @@ async def dispatch(
     dispatch_config: DispatchConfig,
     operation_override: OperationOverride | None = None,
     request_id: str | None = None,
-    session: SessionContext | None = None,
+    session: Any = None,  # specmcp.runtime.session.SessionContext | None
 ) -> list[dict[str, Any]]:
     """Dispatch a tool call to the upstream API.
 
@@ -67,6 +67,8 @@ async def dispatch(
         dispatch_config: Global dispatch settings.
         operation_override: Per-operation overrides from config (timeout, etc.).
         request_id: Correlation ID for log/error attribution.
+        session: Optional SessionContext. Passed to AuthInjector for per-session
+            token lookup (client_token priority).
 
     Returns:
         MCP content blocks list, e.g. [{"type": "text", "text": "..."}].

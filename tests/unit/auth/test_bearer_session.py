@@ -145,3 +145,19 @@ def test_client_params_meta_without_bearer_token():
     })
     assert params.meta is not None
     assert params.meta.model_extra.get("bearer_token") is None
+
+
+@pytest.mark.asyncio
+async def test_bearer_client_token_updated_mid_session():
+    """Updating client_token on the session immediately affects subsequent injects."""
+    injector = _bearer_injector(env_token="env-token")
+    session = SessionContext(session_id="sid")
+
+    # Before client_token is set: static token
+    h1, _ = await injector.inject(_auth_reqs(), headers={}, params={}, session=session)
+    assert h1["Authorization"] == "Bearer env-token"
+
+    # After lazy init sets client_token
+    session.client_token = SensitiveStr("late-client-token")
+    h2, _ = await injector.inject(_auth_reqs(), headers={}, params={}, session=session)
+    assert h2["Authorization"] == "Bearer late-client-token"

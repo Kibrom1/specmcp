@@ -1,108 +1,99 @@
-"""
-AES-256-GCM token encryption for SqliteTokenStore.
+"""AES-256-GCM encryption helpers for the token store.
 
-All functions are pure (no I/O, no config imports) and operate on raw bytes.
-This makes them easy to unit-test in isolation and reuse across contexts.
+All functions use the ``cryptography`` library (PyCA). The key derivation
+function is HKDF-SHA256, producing a 256-bit derived key from a master key
+and a context string. This isolates token-store keys from other uses of the
+same master key.
 
-Key derivation:
-  derive_key(master_key, context) uses HKDF-SHA256 to derive a 32-byte AES key
-  from a master key. Different context strings produce different derived keys,
-  allowing future key versioning without changing the master key.
+Wire format for ``encrypt`` output::
 
-Encryption format (encrypt → bytes):
-  | 12-byte nonce | ciphertext + 16-byte GCM tag |
+    [ nonce (12 bytes) | ciphertext (variable) | GCM tag (16 bytes) ]
 
-  The nonce is randomly generated per call; no nonce reuse is possible.
-  The GCM tag is appended by the `cryptography` library automatically.
-
-Decryption:
-  decrypt(ciphertext, key) expects the same format produced by encrypt().
-  Raises ValueError if the GCM tag check fails (tampered ciphertext).
+The tag is appended by ``AESGCM.encrypt()`` automatically.
 """
 
 from __future__ import annotations
 
 import os
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.hashes import SHA256
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+_NONCE_BYTES = 12   # 96-bit nonce — recommended for AES-GCM
+_TAG_BYTES = 16     # GCM authentication tag
+
 
 def derive_key(master_key: bytes, context: str) -> bytes:
-    """Derive a 32-byte AES-256 key from *master_key* using HKDF-SHA256.
+    """Derive a 256-bit key from *master_key* using HKDF-SHA256.
+
+    Different *context* strings produce independent keys, so the token store
+    can use a dedicated sub-key even if the master key is shared.
 
     Args:
-        master_key: The master key bytes (e.g. decoded from TOKEN_STORE_KEY).
-        context: A short, unique label for the derived key's purpose.
-            Different contexts produce different keys — use versioned strings
-            like "token_store_v1" to allow future key rotation without changing
-            the master key.
+        master_key: Raw bytes of any length (recommended: >= 32 bytes).
+        context: Unique ASCII string identifying this key's purpose.
 
     Returns:
-        32 bytes suitable for AES-256-GCM.
+        32-byte derived key.
     """
-    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-    from cryptography.hazmat.primitives import hashes
-
     hkdf = HKDF(
-        algorithm=hashes.SHA256(),
+        algorithm=SHA256(),
         length=32,
         salt=None,
-        info=context.encode(),
+        info=context.encode("ascii"),
     )
     return hkdf.derive(master_key)
 
 
 def encrypt(plaintext: str, key: bytes) -> bytes:
-    """AES-256-GCM encrypt *plaintext* with *key*.
+    """Encrypt *plaintext* with AES-256-GCM using a random nonce.
 
-    A fresh 12-byte nonce is generated on every call — callers should never
-    pass the same (key, nonce) pair twice, but this function guarantees it
-    by using os.urandom(12).
+    Each call generates a fresh 12-byte random nonce, so identical plaintexts
+    produce different ciphertexts. The nonce is prepended to the output.
+
+    Args:
+        plaintext: UTF-8 string to encrypt.
+        key: 32-byte AES key (e.g. from ``derive_key``).
 
     Returns:
-        Bytes in the format: ``nonce (12) || ciphertext+tag``.
-        The GCM authentication tag is the last 16 bytes of ciphertext+tag.
+        Bytes: nonce (12) + ciphertext + tag (16).
     """
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-    nonce = os.urandom(12)
+    nonce = os.urandom(_NONCE_BYTES)
     aesgcm = AESGCM(key)
-    ciphertext_with_tag = aesgcm.encrypt(nonce, plaintext.encode(), None)
-    return nonce + ciphertext_with_tag
+    ciphertext_and_tag = aesgcm.encrypt(nonce, plaintext.encode("utf-8"), None)
+    return nonce + ciphertext_and_tag
 
 
 def decrypt(ciphertext: bytes, key: bytes) -> str:
-    """AES-256-GCM decrypt *ciphertext* with *key*.
+    """Decrypt *ciphertext* and return the plaintext string.
 
     Args:
-        ciphertext: Bytes produced by :func:`encrypt` — nonce followed by
-            ciphertext+tag.
-        key: The same 32-byte key used for encryption.
+        ciphertext: Output of ``encrypt`` — nonce + ciphertext + tag.
+        key: 32-byte AES key matching the one used for encryption.
 
     Returns:
-        The original plaintext string.
+        Decrypted UTF-8 string.
 
     Raises:
-        ValueError: If the GCM authentication tag check fails, indicating the
-            ciphertext was tampered with or the wrong key was used.
-        ValueError: If the ciphertext is too short to contain a nonce + tag.
+        ValueError: if the input is too short, the tag fails verification
+            (wrong key, tampered data), or the plaintext is not valid UTF-8.
     """
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    from cryptography.exceptions import InvalidTag
-
-    if len(ciphertext) < 12 + 16:  # nonce + minimum tag
+    min_length = _NONCE_BYTES + _TAG_BYTES  # 28 bytes — just nonce + tag, no body
+    if len(ciphertext) < min_length:
         raise ValueError(
-            f"Ciphertext too short ({len(ciphertext)} bytes); "
-            "expected at least 28 bytes (12-byte nonce + 16-byte tag)."
+            f"Ciphertext is too short ({len(ciphertext)} bytes); "
+            f"minimum is {min_length} bytes (nonce + tag)."
         )
 
-    nonce = ciphertext[:12]
-    ct_with_tag = ciphertext[12:]
+    nonce = ciphertext[:_NONCE_BYTES]
+    body = ciphertext[_NONCE_BYTES:]
+
     aesgcm = AESGCM(key)
-
     try:
-        plaintext_bytes = aesgcm.decrypt(nonce, ct_with_tag, None)
+        plaintext_bytes = aesgcm.decrypt(nonce, body, None)
     except InvalidTag as exc:
-        raise ValueError(
-            "AES-GCM authentication failed — ciphertext is tampered or wrong key."
-        ) from exc
+        raise ValueError("Decryption authentication failed — wrong key or tampered data.") from exc
 
-    return plaintext_bytes.decode()
+    return plaintext_bytes.decode("utf-8")

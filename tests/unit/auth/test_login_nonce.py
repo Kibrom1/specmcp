@@ -110,3 +110,16 @@ async def test_concurrent_issue_and_consume_are_safe():
 
     # All consumed — store should be empty
     assert await store.pending_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_expired_nonce_returns_none():
+    """A nonce created with ttl=0.05 expires and consume() returns None."""
+    store = LoginNonceStore(ttl=0.05)  # 50 ms TTL
+    nonce = await store.issue("session-x")
+
+    # Wait for the TTL to expire
+    await asyncio.sleep(0.15)
+
+    result = await store.consume(nonce)
+    assert result is None

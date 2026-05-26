@@ -24,7 +24,7 @@ import pytest
 import respx
 import httpx
 
-from specmcp.auth.injector import AuthInjector, ResolvedScheme
+from specmcp.auth.injector import AuthInjector, ResolvedScheme, _fetch_client_credentials_token
 from specmcp.auth.token_cache import CachedToken, TokenCache
 from specmcp.config import (
     Config,
@@ -169,7 +169,7 @@ async def test_fetch_token_success():
         json={"access_token": "at-abc123", "token_type": "Bearer", "expires_in": 3600},
     ))
 
-    token = await injector._fetch_token(resolved, cfg)
+    token = await _fetch_client_credentials_token(resolved, cfg)
 
     assert isinstance(token, CachedToken)
     assert token.access_token == "at-abc123"
@@ -179,10 +179,11 @@ async def test_fetch_token_success():
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_fetch_token_sends_correct_form_fields():
-    """_fetch_token() must POST grant_type via Basic Auth (RFC 6749 §2.3.1).
+async def test_fetch_token_sends_basic_auth_not_body():
+    """_fetch_token() must use HTTP Basic Auth (RFC 6749 §2.3.1).
 
-    Credentials go in the Authorization header, NOT the request body.
+    Credentials must appear in Authorization: Basic header, NOT in the
+    request body. grant_type must still be in the body.
     """
     import base64
 
@@ -195,23 +196,25 @@ async def test_fetch_token_sends_correct_form_fields():
         json={"access_token": "tok", "expires_in": 600},
     ))
 
-    await injector._fetch_token(resolved, cfg)
+    await _fetch_client_credentials_token(resolved, cfg)
 
     request = route.calls[0].request
+
+    # Credentials must be in the Authorization: Basic header
+    auth_header = request.headers.get("authorization", "")
+    assert auth_header.startswith("Basic "), f"Expected Basic auth, got: {auth_header!r}"
+    decoded = base64.b64decode(auth_header[6:]).decode()
+    assert decoded == "my-id:my-secret"
+
+    # grant_type must still be in the body
     body = dict(pair.split("=") for pair in request.content.decode().split("&"))
 
     # grant_type must be in the body
     assert body["grant_type"] == "client_credentials"
 
-    # client_id and client_secret must NOT be in the body (RFC 6749 §2.3.1)
-    assert "client_id" not in body, "client_id must not appear in POST body"
-    assert "client_secret" not in body, "client_secret must not appear in POST body"
-
-    # Credentials must be in Authorization: Basic header
-    auth_header = request.headers.get("authorization", "")
-    assert auth_header.startswith("Basic "), f"Expected Basic auth, got: {auth_header!r}"
-    decoded = base64.b64decode(auth_header[6:]).decode()
-    assert decoded == "my-id:my-secret"
+    # Credentials must NOT be in the request body
+    assert "client_id" not in body, "client_id must not appear in POST body (use Basic Auth)"
+    assert "client_secret" not in body, "client_secret must not appear in POST body (use Basic Auth)"
 
 
 @pytest.mark.asyncio
@@ -227,7 +230,7 @@ async def test_fetch_token_includes_scopes():
         json={"access_token": "tok", "expires_in": 600},
     ))
 
-    await injector._fetch_token(resolved, cfg)
+    await _fetch_client_credentials_token(resolved, cfg)
 
     request = route.calls[0].request
     body = dict(pair.split("=") for pair in request.content.decode().split("&"))
@@ -247,7 +250,7 @@ async def test_fetch_token_includes_extra_params():
         json={"access_token": "tok", "expires_in": 600},
     ))
 
-    await injector._fetch_token(resolved, cfg)
+    await _fetch_client_credentials_token(resolved, cfg)
 
     request = route.calls[0].request
     raw_body = request.content.decode()
@@ -268,7 +271,7 @@ async def test_fetch_token_defaults_expires_in_to_3600():
     ))
 
     before = time.monotonic()
-    token = await injector._fetch_token(resolved, cfg)
+    token = await _fetch_client_credentials_token(resolved, cfg)
     after = time.monotonic()
 
     # expires_at should be ~3600 seconds from now
@@ -291,7 +294,7 @@ async def test_fetch_token_non_200_raises():
     respx.post(TOKEN_URL).mock(return_value=httpx.Response(400, json={"error": "invalid_client"}))
 
     with pytest.raises(TokenRefreshError) as exc_info:
-        await injector._fetch_token(resolved, cfg)
+        await _fetch_client_credentials_token(resolved, cfg)
 
     assert "400" in str(exc_info.value)
     # Token URL is safe to include; client_secret must not appear
@@ -309,7 +312,7 @@ async def test_fetch_token_non_json_raises():
     respx.post(TOKEN_URL).mock(return_value=httpx.Response(200, text="not-json"))
 
     with pytest.raises(TokenRefreshError, match="non-JSON"):
-        await injector._fetch_token(resolved, cfg)
+        await _fetch_client_credentials_token(resolved, cfg)
 
 
 @pytest.mark.asyncio
@@ -326,7 +329,7 @@ async def test_fetch_token_missing_access_token_raises():
     ))
 
     with pytest.raises(TokenRefreshError, match="access_token"):
-        await injector._fetch_token(resolved, cfg)
+        await _fetch_client_credentials_token(resolved, cfg)
 
 
 @pytest.mark.asyncio
@@ -340,7 +343,7 @@ async def test_fetch_token_network_error_raises():
     respx.post(TOKEN_URL).mock(side_effect=httpx.ConnectError("refused"))
 
     with pytest.raises(TokenRefreshError, match="ConnectError"):
-        await injector._fetch_token(resolved, cfg)
+        await _fetch_client_credentials_token(resolved, cfg)
 
 
 # ---------------------------------------------------------------------------

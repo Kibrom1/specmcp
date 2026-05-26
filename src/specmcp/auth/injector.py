@@ -14,9 +14,9 @@ Design rules:
   - inject() is async because OAuth token fetches are network calls.
     For non-OAuth schemes inject() completes synchronously (no await inside).
 
-Architecture (Phase 1 refactor):
+Architecture:
   The flat isinstance chain in _inject_scheme has been replaced with an
-  internal _AuthSchemeHandler protocol and a lookup dict (_HANDLERS).
+  internal _AuthSchemeHandler protocol and a _HANDLERS lookup dict.
   This sets up clean extension points for Phase 4 (Authorization Code)
   without changing the public inject() API.
 """
@@ -29,12 +29,14 @@ from typing import Any, Protocol, runtime_checkable
 
 import httpx
 
+from specmcp.auth.oauth2_authcode import AuthCodeHandler
 from specmcp.auth.token_cache import CachedToken, TokenCache
 from specmcp.config import (
     ApiKeyAuthConfig,
     AuthSchemeConfig,
     BearerAuthConfig,
     Config,
+    OAuth2AuthorizationCodeConfig,
     OAuth2ClientCredentialsConfig,
     SensitiveStr,
     _resolve_value_from,
@@ -42,9 +44,118 @@ from specmcp.config import (
 from specmcp.core.model import AuthRequirement
 from specmcp.errors import AuthConfigError, TokenRefreshError
 
-# SessionContext imported lazily to avoid circular imports at module load.
-# The type annotation uses a string forward reference.
-# from specmcp.runtime.session import SessionContext  (imported below)
+
+# ---------------------------------------------------------------------------
+# Internal handler protocol
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class _AuthSchemeHandler(Protocol):
+    """Internal protocol for scheme-specific injection logic."""
+
+    async def apply(
+        self,
+        resolved: "ResolvedScheme",
+        headers: dict[str, str],
+        params: dict[str, str],
+        *,
+        token_cache: "TokenCache | None",
+        session: Any,  # SessionContext | None — typed as Any to avoid circular import
+    ) -> None:
+        """Mutate *headers*/*params* in place."""
+        ...
+
+
+class _ApiKeyHandler:
+    async def apply(
+        self,
+        resolved: "ResolvedScheme",
+        headers: dict[str, str],
+        params: dict[str, str],
+        *,
+        token_cache: "TokenCache | None",
+        session: Any,
+    ) -> None:
+        cfg = resolved.config
+        assert isinstance(cfg, ApiKeyAuthConfig)
+        assert resolved.credential is not None
+        value = resolved.credential.reveal()
+        if cfg.in_ == "header":
+            headers[cfg.name] = value
+        elif cfg.in_ == "query":
+            params[cfg.name] = value
+        elif cfg.in_ == "cookie":
+            existing = headers.get("Cookie", "")
+            cookie_pair = f"{cfg.name}={value}"
+            headers["Cookie"] = f"{existing}; {cookie_pair}" if existing else cookie_pair
+
+
+class _BearerHandler:
+    """Bearer token handler.
+
+    Priority order:
+      1. ``session.client_token`` — bearer token forwarded by the MCP client
+         via ``initialize._meta.bearer_token``. The client is responsible for
+         keeping it fresh; specmcp never refreshes it.
+      2. Static env-var token from the config ``bearer`` scheme.
+    """
+
+    async def apply(
+        self,
+        resolved: "ResolvedScheme",
+        headers: dict[str, str],
+        params: dict[str, str],
+        *,
+        token_cache: "TokenCache | None",
+        session: Any,
+    ) -> None:
+        # Priority 1: client-supplied bearer token (from MCP initialize._meta)
+        if session is not None and session.client_token is not None:
+            headers["Authorization"] = f"Bearer {session.client_token.reveal()}"
+            return
+
+        # Priority 2: static env-var bearer token
+        assert resolved.credential is not None
+        headers["Authorization"] = f"Bearer {resolved.credential.reveal()}"
+
+
+class _ClientCredentialsHandler:
+    """OAuth 2.0 client_credentials handler with token caching.
+
+    Uses HTTP Basic Auth (RFC 6749 §2.3.1) to send client credentials:
+    the client_id and client_secret are sent as the ``auth=`` parameter
+    to httpx, which encodes them as an Authorization: Basic header.
+    Credentials are NEVER sent in the request body.
+    """
+
+    async def apply(
+        self,
+        resolved: "ResolvedScheme",
+        headers: dict[str, str],
+        params: dict[str, str],
+        *,
+        token_cache: "TokenCache | None",
+        session: Any,
+    ) -> None:
+        assert token_cache is not None
+        token = await token_cache.get_or_refresh(
+            lambda r=resolved, c=resolved.config: _fetch_client_credentials_token(r, c)  # type: ignore[arg-type]
+        )
+        headers["Authorization"] = f"Bearer {token}"
+
+
+# Registry: config type → handler instance
+_HANDLERS: dict[type, _AuthSchemeHandler] = {
+    ApiKeyAuthConfig: _ApiKeyHandler(),
+    BearerAuthConfig: _BearerHandler(),
+    OAuth2ClientCredentialsConfig: _ClientCredentialsHandler(),
+}
+
+
+# ---------------------------------------------------------------------------
+# ResolvedScheme
+# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -64,106 +175,6 @@ class ResolvedScheme:
     oauth_client_secret: SensitiveStr | None = None  # oauth2_client_credentials
 
 
-# ---------------------------------------------------------------------------
-# Internal handler protocol
-# ---------------------------------------------------------------------------
-
-
-@runtime_checkable
-class _AuthSchemeHandler(Protocol):
-    """Internal protocol: one handler per auth scheme type.
-
-    Replaces the isinstance chain in the original _inject_scheme method.
-    Handlers mutate *headers* or *params* in place. Async because OAuth
-    handlers may need to fetch tokens.
-    """
-
-    async def apply(
-        self,
-        resolved: ResolvedScheme,
-        headers: dict[str, str],
-        params: dict[str, str],
-        *,
-        token_caches: dict[str, TokenCache],
-        fetch_token_fn: Any,
-        session: Any,  # SessionContext | None
-    ) -> None: ...
-
-
-class _ApiKeyHandler:
-    async def apply(
-        self,
-        resolved: ResolvedScheme,
-        headers: dict[str, str],
-        params: dict[str, str],
-        *,
-        token_caches: dict[str, TokenCache],
-        fetch_token_fn: Any,
-        session: Any,
-    ) -> None:
-        cfg = resolved.config
-        assert isinstance(cfg, ApiKeyAuthConfig)
-        assert resolved.credential is not None
-        value = resolved.credential.reveal()
-        if cfg.in_ == "header":
-            headers[cfg.name] = value
-        elif cfg.in_ == "query":
-            params[cfg.name] = value
-        elif cfg.in_ == "cookie":
-            existing = headers.get("Cookie", "")
-            cookie_pair = f"{cfg.name}={value}"
-            headers["Cookie"] = f"{existing}; {cookie_pair}" if existing else cookie_pair
-
-
-class _BearerHandler:
-    async def apply(
-        self,
-        resolved: ResolvedScheme,
-        headers: dict[str, str],
-        params: dict[str, str],
-        *,
-        token_caches: dict[str, TokenCache],
-        fetch_token_fn: Any,
-        session: Any,
-    ) -> None:
-        # Phase 2: client token passed in MCP session init takes priority
-        if session is not None and session.client_token is not None:
-            headers["Authorization"] = f"Bearer {session.client_token.reveal()}"
-            return
-        assert resolved.credential is not None
-        headers["Authorization"] = f"Bearer {resolved.credential.reveal()}"
-
-
-class _ClientCredentialsHandler:
-    async def apply(
-        self,
-        resolved: ResolvedScheme,
-        headers: dict[str, str],
-        params: dict[str, str],
-        *,
-        token_caches: dict[str, TokenCache],
-        fetch_token_fn: Any,
-        session: Any,
-    ) -> None:
-        cache = token_caches[resolved.scheme_name]
-        token = await cache.get_or_refresh(
-            lambda r=resolved, c=resolved.config: fetch_token_fn(r, c)
-        )
-        headers["Authorization"] = f"Bearer {token}"
-
-
-_HANDLERS: dict[type, _AuthSchemeHandler] = {
-    ApiKeyAuthConfig: _ApiKeyHandler(),
-    BearerAuthConfig: _BearerHandler(),
-    OAuth2ClientCredentialsConfig: _ClientCredentialsHandler(),
-}
-
-
-# ---------------------------------------------------------------------------
-# AuthInjector
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class AuthInjector:
     """Injects auth credentials into outbound HTTP request parameters.
@@ -171,14 +182,21 @@ class AuthInjector:
     Usage::
 
         injector = AuthInjector.build(config)
-        headers, params = await injector.inject(op.auth, headers={}, params={}, session=session)
+        headers, params = await injector.inject(op.auth, headers={}, params={})
 
     ``inject`` mutates *copies* of the passed dicts and returns them.
     The originals are never modified.
+
+    Auth code schemes are registered separately via
+    ``register_auth_code_handler()`` because they require runtime state
+    (token store, nonce store) that is not available at config-parse time.
     """
 
     _schemes: dict[str, ResolvedScheme] = field(default_factory=dict, repr=False)
     _token_caches: dict[str, TokenCache] = field(default_factory=dict, repr=False)
+    _auth_code_handlers: dict[str, AuthCodeHandler] = field(
+        default_factory=dict, repr=False
+    )
 
     # ------------------------------------------------------------------
     # Construction
@@ -203,8 +221,6 @@ class AuthInjector:
             return cls(_schemes={}, _token_caches={})
 
         # Resolve static credentials (apiKey, bearer) eagerly.
-        # OAuth2 client_id/secret are also resolved eagerly so missing env
-        # vars fail at startup, not on the first tool call.
         static_values = config.resolve_auth_values()
 
         schemes: dict[str, ResolvedScheme] = {}
@@ -225,7 +241,7 @@ class AuthInjector:
                 schemes[name] = ResolvedScheme(
                     scheme_name=name,
                     config=scheme_cfg,
-                    credential=static_values[name],
+                    credential=static_values.get(name),
                 )
 
         return cls(_schemes=schemes, _token_caches=token_caches)
@@ -253,8 +269,8 @@ class AuthInjector:
                 Empty list means no auth required.
             headers: Existing request headers dict (will be copied).
             params: Existing query params dict (will be copied).
-            session: Optional SessionContext for per-user token lookup.
-                None for v1 configs (no behaviour change).
+            session: Optional SessionContext. When present, client_token
+                takes priority over the static env-var bearer token.
 
         Returns:
             Tuple of (merged_headers, merged_params) with auth added.
@@ -263,8 +279,6 @@ class AuthInjector:
             AuthConfigError: if no configured group satisfies the
                 operation's auth requirements.
             TokenRefreshError: if an OAuth token fetch fails.
-            AuthRequiredError: if a session has no token and the user
-                must authenticate (Phase 4 Authorization Code flow).
         """
         if not auth_requirements:
             return dict(headers), dict(params)
@@ -293,7 +307,7 @@ class AuthInjector:
         *,
         headers: dict[str, str],
         params: dict[str, str],
-        session: Any,
+        session: Any = None,
     ) -> tuple[dict[str, str], dict[str, str]]:
         """Apply each scheme in *group* to copies of headers/params."""
         out_headers = dict(headers)
@@ -311,95 +325,34 @@ class AuthInjector:
         headers: dict[str, str],
         params: dict[str, str],
         *,
-        session: Any,
+        session: Any = None,
     ) -> None:
-        """Dispatch to the appropriate handler for the scheme type."""
-        cfg = resolved.config
-        handler = _HANDLERS.get(type(cfg))
+        """Dispatch to the appropriate handler based on config type."""
+        # Auth code schemes use dedicated per-scheme handler instances
+        if isinstance(resolved.config, OAuth2AuthorizationCodeConfig):
+            auth_code_handler = self._auth_code_handlers.get(resolved.scheme_name)
+            if auth_code_handler is None:
+                raise AuthConfigError(
+                    f"Auth scheme '{resolved.scheme_name}' (oauth2_authorization_code) "
+                    "has no registered AuthCodeHandler. Call "
+                    "injector.register_auth_code_handler() at startup."
+                )
+            await auth_code_handler.apply(headers, params, session=session)
+            return
+
+        handler = _HANDLERS.get(type(resolved.config))
         if handler is None:
             raise AuthConfigError(
                 f"Auth scheme '{resolved.scheme_name}' has unsupported type "
-                f"{type(cfg).__name__!r}. This is an internal error."
+                f"{type(resolved.config).__name__!r}. This is an internal error."
             )
+        token_cache = self._token_caches.get(resolved.scheme_name)
         await handler.apply(
             resolved,
             headers,
             params,
-            token_caches=self._token_caches,
-            fetch_token_fn=self._fetch_token,
+            token_cache=token_cache,
             session=session,
-        )
-
-    async def _fetch_token(
-        self,
-        resolved: ResolvedScheme,
-        cfg: OAuth2ClientCredentialsConfig,
-    ) -> CachedToken:
-        """Exchange client credentials for an OAuth access token.
-
-        Opens a dedicated httpx.AsyncClient rather than reusing the main
-        HttpClient. This is intentional: the auth layer must not be coupled
-        to the runtime layer, and token fetches are infrequent (once per
-        expiry window, typically 1 hour). trust_env=False matches the main
-        HttpClient policy.
-
-        Security: the client_secret and access_token must never appear in
-        any exception message. Only token_url and status_code are safe.
-
-        RFC 6749 §2.3.1: client credentials are sent via HTTP Basic Auth, NOT
-        in the request body. This prevents credential exposure in proxy logs
-        and server access logs.
-        """
-        assert resolved.oauth_client_id is not None
-        assert resolved.oauth_client_secret is not None
-
-        client_id = resolved.oauth_client_id.reveal()
-        client_secret = resolved.oauth_client_secret.reveal()
-
-        # Body contains only grant_type, optional scope, and any extra_params.
-        # client_id and client_secret are NOT in the body (RFC 6749 §2.3.1).
-        form: dict[str, str] = {
-            "grant_type": "client_credentials",
-            **cfg.extra_params,
-        }
-        if cfg.scopes:
-            form["scope"] = " ".join(cfg.scopes)
-
-        async with httpx.AsyncClient(trust_env=False) as client:
-            try:
-                response = await client.post(
-                    cfg.token_url,
-                    auth=(client_id, client_secret),  # HTTP Basic Auth — RFC 6749 §2.3.1
-                    data=form,
-                    timeout=15.0,
-                )
-            except httpx.RequestError as exc:
-                raise TokenRefreshError(
-                    f"Failed to reach OAuth token endpoint {cfg.token_url!r}: {type(exc).__name__}"
-                ) from exc
-
-        if response.status_code != 200:
-            raise TokenRefreshError(
-                f"OAuth token endpoint {cfg.token_url!r} returned HTTP {response.status_code}",
-                status_code=response.status_code,
-            )
-
-        try:
-            body: dict[str, Any] = response.json()
-        except Exception as exc:
-            raise TokenRefreshError(
-                f"OAuth token endpoint {cfg.token_url!r} returned non-JSON response"
-            ) from exc
-
-        if "access_token" not in body:
-            raise TokenRefreshError(
-                f"OAuth token endpoint {cfg.token_url!r} response missing 'access_token' field"
-            )
-
-        expires_in = float(body.get("expires_in", 3600))
-        return CachedToken(
-            access_token=body["access_token"],  # never log; used only in Authorization header
-            expires_at=time.monotonic() + expires_in,
         )
 
     def _find_missing_schemes(
@@ -414,14 +367,110 @@ class AuthInjector:
         return missing
 
     # ------------------------------------------------------------------
+    # Auth code handler registration
+    # ------------------------------------------------------------------
+
+    def register_auth_code_handler(
+        self, scheme_name: str, handler: AuthCodeHandler
+    ) -> None:
+        """Register an OAuth2 Authorization Code handler for *scheme_name*.
+
+        Must be called after ``build()`` and before the first ``inject()``
+        that involves this scheme.  The *handler* instance encapsulates the
+        token store, nonce issuer, and login base URL — all runtime state
+        that is not available at config-parse time.
+
+        The corresponding scheme is also added to ``_schemes`` as a
+        placeholder ``ResolvedScheme`` (with no credential) so that
+        ``_group_is_satisfied`` recognises it as configured.
+        """
+        self._auth_code_handlers[scheme_name] = handler
+        # Register a placeholder ResolvedScheme so _group_is_satisfied works
+        if scheme_name not in self._schemes:
+            from specmcp.config import OAuth2AuthorizationCodeConfig
+            # We can't reconstruct the config here, so use a minimal sentinel
+            # value; _inject_scheme dispatches via _auth_code_handlers first.
+            self._schemes[scheme_name] = ResolvedScheme(
+                scheme_name=scheme_name,
+                config=handler._config,  # noqa: SLF001
+            )
+
+    # ------------------------------------------------------------------
     # Introspection helpers
     # ------------------------------------------------------------------
 
     @property
     def configured_schemes(self) -> frozenset[str]:
         """Names of all configured auth schemes."""
-        return frozenset(self._schemes)
+        return frozenset(self._schemes) | frozenset(self._auth_code_handlers)
 
     def has_scheme(self, name: str) -> bool:
         """Return True if *name* is configured."""
-        return name in self._schemes
+        return name in self._schemes or name in self._auth_code_handlers
+
+
+# ---------------------------------------------------------------------------
+# OAuth client_credentials token fetch (module-level to keep handler thin)
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_client_credentials_token(
+    resolved: ResolvedScheme,
+    cfg: OAuth2ClientCredentialsConfig,
+) -> CachedToken:
+    """Exchange client credentials for an OAuth access token.
+
+    Uses HTTP Basic Auth (RFC 6749 §2.3.1) — credentials are sent in the
+    Authorization header, NOT in the request body. This fixes security
+    finding H4 from the design review.
+
+    Security: the client_secret and access_token must never appear in
+    any exception message. Only token_url and status_code are safe.
+    """
+    assert resolved.oauth_client_id is not None
+    assert resolved.oauth_client_secret is not None
+
+    client_id = resolved.oauth_client_id.reveal()
+    client_secret = resolved.oauth_client_secret.reveal()
+
+    # Build form body: grant_type + scopes + extra_params only (no credentials)
+    form: dict[str, str] = {"grant_type": "client_credentials", **cfg.extra_params}
+    if cfg.scopes:
+        form["scope"] = " ".join(cfg.scopes)
+
+    async with httpx.AsyncClient(trust_env=False) as client:
+        try:
+            response = await client.post(
+                cfg.token_url,
+                auth=(client_id, client_secret),  # HTTP Basic Auth per RFC 6749 §2.3.1
+                data=form,
+                timeout=15.0,
+            )
+        except httpx.RequestError as exc:
+            raise TokenRefreshError(
+                f"Failed to reach OAuth token endpoint {cfg.token_url!r}: {type(exc).__name__}"
+            ) from exc
+
+    if response.status_code != 200:
+        raise TokenRefreshError(
+            f"OAuth token endpoint {cfg.token_url!r} returned HTTP {response.status_code}",
+            status_code=response.status_code,
+        )
+
+    try:
+        body: dict[str, Any] = response.json()
+    except Exception as exc:
+        raise TokenRefreshError(
+            f"OAuth token endpoint {cfg.token_url!r} returned non-JSON response"
+        ) from exc
+
+    if "access_token" not in body:
+        raise TokenRefreshError(
+            f"OAuth token endpoint {cfg.token_url!r} response missing 'access_token' field"
+        )
+
+    expires_in = float(body.get("expires_in", 3600))
+    return CachedToken(
+        access_token=body["access_token"],
+        expires_at=time.monotonic() + expires_in,
+    )

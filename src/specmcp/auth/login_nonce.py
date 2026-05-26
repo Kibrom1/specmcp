@@ -1,23 +1,14 @@
-"""
-Single-use login nonces for the OAuth Authorization Code flow.
+"""Login nonce store for OAuth Authorization Code flow.
 
-When a tool call requires auth but the session has no token, specmcp issues a
-single-use nonce and returns a login URL to the LLM:
-
-    "Visit https://<host>/auth/login?nonce=<token> to authenticate."
-
-The LoginNonceStore maps nonce → session_id server-side. The session_id itself
-is never included in the URL — this ensures the login URL is safe even if the
-LLM provider logs conversation history. The nonce is consumed (deleted) on
-first use and automatically expires after 5 minutes.
+A nonce is issued when an MCP session needs to authenticate. It is a
+single-use, short-lived secret that maps a login URL's nonce parameter
+back to the originating session_id. Once consumed the nonce is deleted.
 
 Security properties:
-  - 256-bit entropy (secrets.token_urlsafe(32))
-  - Single-use: consume() removes the nonce atomically
-  - TTL: 300 seconds via cachetools.TTLCache
-  - Bounded size: maxsize=10_000 prevents memory exhaustion under a flood of
-    requests — excess entries cause the oldest nonces to be evicted (safe: the
-    affected users simply need to request a new login link)
+  - Nonces are generated with secrets.token_urlsafe(32) (256-bit entropy).
+  - Nonces expire after ``ttl`` seconds (default 300 = 5 minutes).
+  - Consumption is atomic: concurrent calls will never both succeed.
+  - The store is bounded (default maxsize=10_000) to prevent unbounded growth.
 """
 
 from __future__ import annotations
@@ -29,31 +20,21 @@ from cachetools import TTLCache
 
 
 class LoginNonceStore:
-    """Thread-safe, single-use, time-limited nonce store.
+    """TTL-bounded store mapping nonce -> session_id.
 
-    Example usage::
-
-        store = LoginNonceStore()
-        nonce = await store.issue("session-uuid")
-        # ... return nonce in login URL to LLM ...
-        session_id = await store.consume(nonce)   # returns session_id and removes nonce
-        assert await store.consume(nonce) is None  # single-use: second consume returns None
+    Thread-safety: all public methods are async and protected by a single
+    asyncio.Lock so they are safe under concurrent tool calls.
     """
 
-    def __init__(
-        self,
-        *,
-        maxsize: int = 10_000,
-        ttl: int = 300,  # 5 minutes
-    ) -> None:
+    def __init__(self, *, maxsize: int = 10_000, ttl: float = 300.0) -> None:
         self._store: TTLCache[str, str] = TTLCache(maxsize=maxsize, ttl=ttl)
         self._lock = asyncio.Lock()
 
     async def issue(self, session_id: str) -> str:
-        """Generate a new nonce and map it to *session_id*.
+        """Create a fresh nonce that maps to *session_id* and return it.
 
-        Returns the nonce string (43+ chars, URL-safe, 256 bits of entropy).
-        The nonce expires after the configured TTL and can only be consumed once.
+        The nonce is a 43-character URL-safe base64 string with 256-bit entropy.
+        It expires after ``ttl`` seconds (default 5 minutes).
         """
         nonce = secrets.token_urlsafe(32)
         async with self._lock:
@@ -61,14 +42,15 @@ class LoginNonceStore:
         return nonce
 
     async def consume(self, nonce: str) -> str | None:
-        """Return the session_id for *nonce* and delete it (single-use).
+        """Look up and delete *nonce*, returning the session_id or None.
 
-        Returns None if the nonce is unknown, already consumed, or expired.
+        Returns None if the nonce was never issued, has already been used,
+        or has expired. Each nonce can only be consumed once.
         """
         async with self._lock:
             return self._store.pop(nonce, None)
 
     async def pending_count(self) -> int:
-        """Return the number of currently active (unexpired) nonces."""
+        """Return the number of unexpired nonces currently in the store."""
         async with self._lock:
             return len(self._store)

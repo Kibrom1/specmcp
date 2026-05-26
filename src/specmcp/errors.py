@@ -215,14 +215,11 @@ class AuthConfigError(AuthError):
 
 
 class AuthRequiredError(AuthError):
-    """No OAuth token exists for this session; user must authenticate via login URL.
+    """No OAuth token for this session; user must authenticate via login URL.
 
     Raised by the auth layer when an Authorization Code flow operation is called
     but the session has no valid token. The dispatcher catches this and returns
     an actionable message to the LLM containing the single-use login URL.
-
-    The nonce (not the session_id) is included in the login URL. The session_id
-    is never surfaced to the LLM.
     """
 
     code = "runtime.auth_required"

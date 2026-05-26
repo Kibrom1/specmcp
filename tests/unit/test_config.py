@@ -313,3 +313,228 @@ def test_scaffold_includes_streaming_fields():
     assert "streaming_max_bytes:" in yaml_str
     # The multiplier footgun should be documented inline
     assert "per-operation" in yaml_str
+
+
+# ---------------------------------------------------------------------------
+# OAuth validators — token_url must be https://
+# ---------------------------------------------------------------------------
+
+
+def test_oauth2_cc_rejects_http_token_url(tmp_path, monkeypatch):
+    """oauth2_client_credentials token_url must use https://."""
+    monkeypatch.setenv("MY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MY_CLIENT_SECRET", "csecret")
+
+    cfg_yaml = textwrap.dedent("""\
+        version: "1"
+        spec:
+          source: ./spec.json
+        auth:
+          myOAuth:
+            type: oauth2_client_credentials
+            token_url: http://auth.example.com/token
+            client_id_from: env(MY_CLIENT_ID)
+            client_secret_from: env(MY_CLIENT_SECRET)
+    """)
+    cfg_file = tmp_path / "mcp.config.yaml"
+    cfg_file.write_text(cfg_yaml)
+
+    with pytest.raises(ConfigError, match="https"):
+        Config.load(cfg_file)
+
+
+def test_oauth2_cc_accepts_https_token_url(tmp_path, monkeypatch):
+    """oauth2_client_credentials accepts https:// token_url."""
+    monkeypatch.setenv("MY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MY_CLIENT_SECRET", "csecret")
+
+    cfg_yaml = textwrap.dedent("""\
+        version: "1"
+        spec:
+          source: ./spec.json
+        auth:
+          myOAuth:
+            type: oauth2_client_credentials
+            token_url: https://auth.example.com/token
+            client_id_from: env(MY_CLIENT_ID)
+            client_secret_from: env(MY_CLIENT_SECRET)
+    """)
+    cfg_file = tmp_path / "mcp.config.yaml"
+    cfg_file.write_text(cfg_yaml)
+
+    cfg = Config.load(cfg_file)
+    assert "myOAuth" in cfg._auth_schemes
+
+
+def test_oauth2_cc_accepts_localhost_http(tmp_path, monkeypatch):
+    """oauth2_client_credentials accepts http://localhost for local testing."""
+    monkeypatch.setenv("MY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MY_CLIENT_SECRET", "csecret")
+
+    cfg_yaml = textwrap.dedent("""\
+        version: "1"
+        spec:
+          source: ./spec.json
+        auth:
+          localOAuth:
+            type: oauth2_client_credentials
+            token_url: http://localhost:8080/token
+            client_id_from: env(MY_CLIENT_ID)
+            client_secret_from: env(MY_CLIENT_SECRET)
+    """)
+    cfg_file = tmp_path / "mcp.config.yaml"
+    cfg_file.write_text(cfg_yaml)
+
+    cfg = Config.load(cfg_file)
+    assert "localOAuth" in cfg._auth_schemes
+
+
+# ---------------------------------------------------------------------------
+# extra_params — reserved field names rejected
+# ---------------------------------------------------------------------------
+
+
+def test_oauth2_cc_rejects_reserved_extra_params(tmp_path, monkeypatch):
+    """extra_params must not include reserved OAuth field names."""
+    monkeypatch.setenv("MY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MY_CLIENT_SECRET", "csecret")
+
+    cfg_yaml = textwrap.dedent("""\
+        version: "1"
+        spec:
+          source: ./spec.json
+        auth:
+          myOAuth:
+            type: oauth2_client_credentials
+            token_url: https://auth.example.com/token
+            client_id_from: env(MY_CLIENT_ID)
+            client_secret_from: env(MY_CLIENT_SECRET)
+            extra_params:
+              grant_type: custom  # reserved!
+    """)
+    cfg_file = tmp_path / "mcp.config.yaml"
+    cfg_file.write_text(cfg_yaml)
+
+    with pytest.raises(ConfigError, match="reserved"):
+        Config.load(cfg_file)
+
+
+def test_oauth2_cc_accepts_non_reserved_extra_params(tmp_path, monkeypatch):
+    """extra_params accepts non-reserved custom fields."""
+    monkeypatch.setenv("MY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MY_CLIENT_SECRET", "csecret")
+
+    cfg_yaml = textwrap.dedent("""\
+        version: "1"
+        spec:
+          source: ./spec.json
+        auth:
+          myOAuth:
+            type: oauth2_client_credentials
+            token_url: https://auth.example.com/token
+            client_id_from: env(MY_CLIENT_ID)
+            client_secret_from: env(MY_CLIENT_SECRET)
+            extra_params:
+              audience: https://api.example.com
+    """)
+    cfg_file = tmp_path / "mcp.config.yaml"
+    cfg_file.write_text(cfg_yaml)
+
+    cfg = Config.load(cfg_file)
+    scheme = cfg._auth_schemes["myOAuth"]
+    assert scheme.extra_params["audience"] == "https://api.example.com"
+
+
+# ---------------------------------------------------------------------------
+# oauth2_authorization_code — requires version "2"
+# ---------------------------------------------------------------------------
+
+
+def test_oauth2_auth_code_requires_version_2(tmp_path, monkeypatch):
+    """oauth2_authorization_code raises ConfigError if config version is '1'."""
+    monkeypatch.setenv("MY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MY_CLIENT_SECRET", "csecret")
+
+    cfg_yaml = textwrap.dedent("""\
+        version: "1"
+        spec:
+          source: ./spec.json
+        auth:
+          userAuth:
+            type: oauth2_authorization_code
+            authorization_url: https://auth.example.com/authorize
+            token_url: https://auth.example.com/token
+            client_id_from: env(MY_CLIENT_ID)
+            client_secret_from: env(MY_CLIENT_SECRET)
+            redirect_uri: https://app.example.com/callback
+    """)
+    cfg_file = tmp_path / "mcp.config.yaml"
+    cfg_file.write_text(cfg_yaml)
+
+    with pytest.raises(ConfigError, match="version.*2"):
+        Config.load(cfg_file)
+
+
+def test_oauth2_auth_code_accepted_with_version_2(tmp_path, monkeypatch):
+    """oauth2_authorization_code is accepted when config version is '2'."""
+    monkeypatch.setenv("MY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MY_CLIENT_SECRET", "csecret")
+
+    cfg_yaml = textwrap.dedent("""\
+        version: "2"
+        spec:
+          source: ./spec.json
+        auth:
+          userAuth:
+            type: oauth2_authorization_code
+            authorization_url: https://auth.example.com/authorize
+            token_url: https://auth.example.com/token
+            client_id_from: env(MY_CLIENT_ID)
+            client_secret_from: env(MY_CLIENT_SECRET)
+            redirect_uri: https://app.example.com/callback
+            scopes:
+              - openid
+    """)
+    cfg_file = tmp_path / "mcp.config.yaml"
+    cfg_file.write_text(cfg_yaml)
+
+    cfg = Config.load(cfg_file)
+    assert "userAuth" in cfg._auth_schemes
+
+
+# ---------------------------------------------------------------------------
+# ManagementConfig defaults
+# ---------------------------------------------------------------------------
+
+
+def test_management_config_defaults(tmp_path):
+    """Config.management has sensible defaults when not specified."""
+    cfg_yaml = textwrap.dedent("""\
+        version: "1"
+        spec:
+          source: ./spec.json
+    """)
+    cfg_file = tmp_path / "mcp.config.yaml"
+    cfg_file.write_text(cfg_yaml)
+    cfg = Config.load(cfg_file)
+    assert cfg.management.bind == "loopback"
+    assert cfg.management.port == 8766
+    assert cfg.management.management_token_from is None
+
+
+# ---------------------------------------------------------------------------
+# Version "2" is supported
+# ---------------------------------------------------------------------------
+
+
+def test_version_2_is_accepted(tmp_path):
+    """Config version '2' loads without error."""
+    cfg_yaml = textwrap.dedent("""\
+        version: "2"
+        spec:
+          source: ./spec.json
+    """)
+    cfg_file = tmp_path / "mcp.config.yaml"
+    cfg_file.write_text(cfg_yaml)
+    cfg = Config.load(cfg_file)
+    assert cfg.version == "2"

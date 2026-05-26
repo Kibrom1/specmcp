@@ -246,3 +246,658 @@ def test_serve_petstore_dry_run_starts_pipeline():
         # anyio.run should have been called (pipeline succeeded)
         assert mock_run.called
         assert r.exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# HTTP transport — CLI and _run_http wiring
+# ---------------------------------------------------------------------------
+
+
+def test_serve_http_transport_accepted_by_cli():
+    """--transport http must reach anyio.run (pipeline succeeds, uvicorn not started)."""
+    with patch("specmcp.cli.serve.anyio.run") as mock_run:
+        r = runner.invoke(app, [
+            "serve",
+            "--spec", str(PETSTORE_SPEC),
+            "--transport", "http",
+        ])
+        assert mock_run.called, f"anyio.run not called; output: {r.output}"
+        assert r.exit_code == 0
+
+
+def test_serve_http_transport_prints_bind_address():
+    """serve --transport http should log the bind address (host:port) to stderr."""
+    with patch("specmcp.cli.serve.anyio.run"):
+        r = runner.invoke(app, [
+            "serve",
+            "--spec", str(PETSTORE_SPEC),
+            "--transport", "http",
+        ])
+    # The startup line should contain the default bind address
+    assert "127.0.0.1:8765" in r.output or "8765" in r.output
+
+
+@pytest.mark.asyncio
+async def test_run_http_uses_cfg_host_and_port():
+    """_run_http must bind uvicorn to cfg.transport.http host/port."""
+    from specmcp.cli.serve import _run_http
+    from specmcp.runtime.registry_ref import RegistryRef
+
+    registry = _make_registry_with_one_tool()
+    registry_ref = RegistryRef(registry)
+    auth_injector = AuthInjector.build(None)
+    dispatch_cfg = DispatchConfig()
+
+    # Build a minimal config with custom http host/port
+    cfg_yaml = textwrap.dedent("""\
+        version: "1"
+        spec:
+          source: ./spec.json
+        transport:
+          http:
+            host: "0.0.0.0"
+            port: 9999
+    """)
+    from specmcp.config import Config
+    with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+        f.write(cfg_yaml)
+        cfg_path = f.name
+
+    cfg = Config.load(Path(cfg_path))
+
+    captured_kwargs: dict = {}
+
+    async def _fake_serve(self):
+        pass
+
+    def _fake_Config(app, host, port, log_level="warning"):
+        captured_kwargs["host"] = host
+        captured_kwargs["port"] = port
+        return MagicMock()
+
+    with patch("uvicorn.Config", side_effect=_fake_Config), \
+         patch("uvicorn.Server", return_value=AsyncMock(serve=AsyncMock())):
+        from specmcp.runtime.http_client import HttpClient
+        async with HttpClient(dispatch_cfg) as http_client:
+            await _run_http(registry_ref, http_client, auth_injector, dispatch_cfg, cfg)
+
+    assert captured_kwargs.get("host") == "0.0.0.0"
+    assert captured_kwargs.get("port") == 9999
+
+
+@pytest.mark.asyncio
+async def test_run_http_starlette_app_has_sse_and_messages_routes():
+    """_run_http must build a Starlette app with /sse and /messages routes."""
+    from specmcp.cli.serve import _run_http
+    from specmcp.runtime.registry_ref import RegistryRef
+
+    registry = _make_registry_with_one_tool()
+    registry_ref = RegistryRef(registry)
+    auth_injector = AuthInjector.build(None)
+    dispatch_cfg = DispatchConfig()
+
+    captured_app = []
+
+    def _fake_Config(app, host, port, log_level="warning"):
+        captured_app.append(app)
+        return MagicMock()
+
+    with patch("uvicorn.Config", side_effect=_fake_Config), \
+         patch("uvicorn.Server", return_value=AsyncMock(serve=AsyncMock())):
+        from specmcp.runtime.http_client import HttpClient
+        async with HttpClient(dispatch_cfg) as http_client:
+            await _run_http(registry_ref, http_client, auth_injector, dispatch_cfg, None)
+
+    assert len(captured_app) == 1
+    starlette_app = captured_app[0]
+
+    # Verify routes: /sse and /messages must exist
+    route_paths = [route.path for route in starlette_app.routes]
+    assert "/sse" in route_paths, f"Expected /sse route, got: {route_paths}"
+    assert "/messages" in route_paths, f"Expected /messages route, got: {route_paths}"
+
+
+# ---------------------------------------------------------------------------
+# _build_oauth_state — no auth code schemes → returns None
+# ---------------------------------------------------------------------------
+
+
+def test_build_oauth_state_none_when_no_config():
+    from specmcp.cli.serve import _build_oauth_state
+
+    injector = AuthInjector.build(None)
+    result = _build_oauth_state(None, injector, "http://localhost:8765")
+    assert result is None
+
+
+def test_build_oauth_state_none_when_no_auth_code_schemes():
+    """Config with only bearer/apiKey schemes → _build_oauth_state returns None."""
+    import textwrap, tempfile, os
+    from specmcp.cli.serve import _build_oauth_state
+    from specmcp.config import Config
+
+    cfg_yaml = textwrap.dedent("""\
+        version: "1"
+        spec:
+          source: ./spec.json
+        auth:
+          myKey:
+            type: apiKey
+            in: header
+            name: X-API-Key
+            value_from: env(MY_KEY)
+    """)
+    with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+        f.write(cfg_yaml)
+        cfg_path = f.name
+
+    try:
+        with patch.dict(os.environ, {"MY_KEY": "test-key"}):
+            cfg = Config.load(Path(cfg_path))
+            injector = AuthInjector.build(cfg)
+        result = _build_oauth_state(cfg, injector, "http://localhost:8765")
+        assert result is None
+    finally:
+        os.unlink(cfg_path)
+
+
+# ---------------------------------------------------------------------------
+# _build_oauth_state — with auth code scheme
+# ---------------------------------------------------------------------------
+
+
+def test_build_oauth_state_returns_handler_state_for_auth_code_scheme():
+    """Config with oauth2_authorization_code → OAuthHandlerState returned."""
+    import textwrap, tempfile, os
+    from specmcp.cli.serve import _build_oauth_state
+    from specmcp.config import Config
+    from specmcp.runtime.oauth_handler import OAuthHandlerState
+
+    cfg_yaml = textwrap.dedent("""\
+        version: "2"
+        spec:
+          source: ./spec.json
+        auth:
+          myOAuth:
+            type: oauth2_authorization_code
+            authorization_url: https://auth.example.com/authorize
+            token_url: https://auth.example.com/token
+            client_id_from: env(TEST_CLIENT_ID)
+            client_secret_from: env(TEST_CLIENT_SECRET)
+            redirect_uri: http://localhost:8765/auth/callback
+            scopes:
+              - openid
+    """)
+    with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+        f.write(cfg_yaml)
+        cfg_path = f.name
+
+    try:
+        with patch.dict(os.environ, {
+            "TEST_CLIENT_ID": "client-id",
+            "TEST_CLIENT_SECRET": "client-secret",
+        }):
+            cfg = Config.load(Path(cfg_path))
+            injector = AuthInjector.build(cfg)
+            result = _build_oauth_state(cfg, injector, "http://localhost:8765")
+
+        assert result is not None
+        assert isinstance(result, OAuthHandlerState)
+        assert "myOAuth" in result.schemes
+    finally:
+        os.unlink(cfg_path)
+
+
+def test_build_oauth_state_registers_auth_code_handler_with_injector():
+    """After _build_oauth_state, injector.has_scheme() must return True."""
+    import textwrap, tempfile, os
+    from specmcp.cli.serve import _build_oauth_state
+    from specmcp.config import Config
+
+    cfg_yaml = textwrap.dedent("""\
+        version: "2"
+        spec:
+          source: ./spec.json
+        auth:
+          myOAuth:
+            type: oauth2_authorization_code
+            authorization_url: https://auth.example.com/authorize
+            token_url: https://auth.example.com/token
+            client_id_from: env(TEST_CLIENT_ID)
+            client_secret_from: env(TEST_CLIENT_SECRET)
+            redirect_uri: http://localhost:8765/auth/callback
+    """)
+    with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+        f.write(cfg_yaml)
+        cfg_path = f.name
+
+    try:
+        with patch.dict(os.environ, {
+            "TEST_CLIENT_ID": "cid",
+            "TEST_CLIENT_SECRET": "csec",
+        }):
+            cfg = Config.load(Path(cfg_path))
+            injector = AuthInjector.build(cfg)
+            # AuthCodeHandler not yet registered (build() adds a placeholder
+            # ResolvedScheme but no AuthCodeHandler)
+            assert "myOAuth" not in injector._auth_code_handlers
+
+            _build_oauth_state(cfg, injector, "http://localhost:8765")
+
+            # AuthCodeHandler is now registered
+            assert "myOAuth" in injector._auth_code_handlers
+    finally:
+        os.unlink(cfg_path)
+
+
+# ---------------------------------------------------------------------------
+# _run_http — OAuth routes mounted when auth code scheme configured
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_http_mounts_oauth_routes_when_auth_code_configured():
+    """When an oauth2_authorization_code scheme is configured, _run_http must
+    mount /auth/login, /auth/callback, /auth/status, and /auth/session/{id}."""
+    import textwrap, tempfile, os
+    from specmcp.cli.serve import _run_http
+    from specmcp.config import Config, DispatchConfig
+    from specmcp.runtime.registry_ref import RegistryRef
+
+    cfg_yaml = textwrap.dedent("""\
+        version: "2"
+        spec:
+          source: ./spec.json
+        auth:
+          myOAuth:
+            type: oauth2_authorization_code
+            authorization_url: https://auth.example.com/authorize
+            token_url: https://auth.example.com/token
+            client_id_from: env(TEST_CLIENT_ID)
+            client_secret_from: env(TEST_CLIENT_SECRET)
+            redirect_uri: http://localhost:8765/auth/callback
+    """)
+    with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+        f.write(cfg_yaml)
+        cfg_path = f.name
+
+    try:
+        with patch.dict(os.environ, {
+            "TEST_CLIENT_ID": "cid",
+            "TEST_CLIENT_SECRET": "csec",
+        }):
+            cfg = Config.load(Path(cfg_path))
+
+            registry = _make_registry_with_one_tool()
+            registry_ref = RegistryRef(registry)
+            injector = AuthInjector.build(cfg)
+            dispatch_cfg = DispatchConfig()
+
+            captured_app = []
+
+            def _fake_Config(app, host, port, log_level="warning"):
+                captured_app.append(app)
+                return MagicMock()
+
+            with patch("uvicorn.Config", side_effect=_fake_Config), \
+                 patch("uvicorn.Server", return_value=AsyncMock(serve=AsyncMock())):
+                from specmcp.runtime.http_client import HttpClient
+                async with HttpClient(dispatch_cfg) as http_client:
+                    await _run_http(registry_ref, http_client, injector, dispatch_cfg, cfg)
+
+        assert len(captured_app) == 1
+        route_paths = {route.path for route in captured_app[0].routes}
+
+        assert "/auth/login" in route_paths, f"Missing /auth/login — got: {route_paths}"
+        assert "/auth/callback" in route_paths, f"Missing /auth/callback — got: {route_paths}"
+        assert "/auth/status" in route_paths, f"Missing /auth/status — got: {route_paths}"
+        assert "/auth/session/{session_id}" in route_paths, \
+            f"Missing /auth/session/{{session_id}} — got: {route_paths}"
+    finally:
+        os.unlink(cfg_path)
+
+
+@pytest.mark.asyncio
+async def test_run_http_no_oauth_routes_without_auth_code_scheme():
+    """Without an auth code scheme, the /auth/* routes must NOT be mounted."""
+    from specmcp.cli.serve import _run_http
+    from specmcp.config import DispatchConfig
+    from specmcp.runtime.registry_ref import RegistryRef
+
+    registry = _make_registry_with_one_tool()
+    registry_ref = RegistryRef(registry)
+    injector = AuthInjector.build(None)
+    dispatch_cfg = DispatchConfig()
+
+    captured_app = []
+
+    def _fake_Config(app, host, port, log_level="warning"):
+        captured_app.append(app)
+        return MagicMock()
+
+    with patch("uvicorn.Config", side_effect=_fake_Config), \
+         patch("uvicorn.Server", return_value=AsyncMock(serve=AsyncMock())):
+        from specmcp.runtime.http_client import HttpClient
+        async with HttpClient(dispatch_cfg) as http_client:
+            await _run_http(registry_ref, http_client, injector, dispatch_cfg, None)
+
+    route_paths = {route.path for route in captured_app[0].routes}
+    auth_routes = {p for p in route_paths if p.startswith("/auth")}
+    assert not auth_routes, f"Expected no /auth/* routes, got: {auth_routes}"
+
+
+# ---------------------------------------------------------------------------
+# CLI flags: --management-port and --management-bind
+# ---------------------------------------------------------------------------
+
+
+def test_serve_help_includes_management_flags():
+    """--management-port and --management-bind must appear in serve --help."""
+    r = runner.invoke(app, ["serve", "--help"])
+    assert r.exit_code == 0
+    assert "--management-port" in r.output
+    assert "--management-bind" in r.output
+
+
+def test_management_bind_invalid_value_exits_nonzero():
+    """--management-bind with a value other than 'loopback'/'all' must fail."""
+    with patch("specmcp.cli.serve.anyio.run"):
+        r = runner.invoke(app, [
+            "serve",
+            "--spec", str(PETSTORE_SPEC),
+            "--management-bind", "bogus",
+        ])
+    assert r.exit_code != 0
+    assert "loopback" in r.output or "loopback" in (r.stderr or "")
+
+
+def test_management_flags_warn_without_config_file():
+    """--management-port without a config file emits a warning (no effect)."""
+    with patch("specmcp.cli.serve.anyio.run"):
+        r = runner.invoke(app, [
+            "serve",
+            "--spec", str(PETSTORE_SPEC),
+            "--config", "/nonexistent/no-config.yaml",
+            "--management-port", "9999",
+        ])
+    # anyio.run is patched, so we reach the warning; exit code 0 (flag is advisory)
+    assert r.exit_code == 0
+    assert "no effect" in r.output.lower() or "no effect" in (r.stderr or "").lower()
+
+
+def test_management_port_flag_overrides_cfg():
+    """--management-port N must override cfg.management.port before _run_server."""
+    cfg_yaml = textwrap.dedent("""\
+        version: "1"
+        spec:
+          source: ./spec.json
+    """)
+    with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+        f.write(cfg_yaml)
+        cfg_path = f.name
+
+    try:
+        captured_cfg: list = []
+
+        def _fake_anyio_run(fn, *args, **kwargs):
+            # positional args to _run_server: registry, auth_injector, dispatch_cfg, cfg, ...
+            captured_cfg.append(args[3])  # cfg is 4th positional arg
+
+        with patch("specmcp.cli.serve.anyio.run", side_effect=_fake_anyio_run):
+            r = runner.invoke(app, [
+                "serve",
+                "--spec", str(PETSTORE_SPEC),
+                "--config", cfg_path,
+                "--management-port", "9876",
+            ])
+
+        assert r.exit_code == 0, f"serve exited {r.exit_code}: {r.output}"
+        assert len(captured_cfg) == 1
+        assert captured_cfg[0].management.port == 9876
+    finally:
+        os.unlink(cfg_path)
+
+
+def test_management_bind_flag_overrides_cfg():
+    """--management-bind all must override cfg.management.bind before _run_server."""
+    cfg_yaml = textwrap.dedent("""\
+        version: "1"
+        spec:
+          source: ./spec.json
+        management:
+          management_token_from: env(MGMT_TOKEN)
+    """)
+    with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+        f.write(cfg_yaml)
+        cfg_path = f.name
+
+    try:
+        captured_cfg: list = []
+
+        def _fake_anyio_run(fn, *args, **kwargs):
+            captured_cfg.append(args[3])
+
+        with patch.dict(os.environ, {"MGMT_TOKEN": "secret"}), \
+             patch("specmcp.cli.serve.anyio.run", side_effect=_fake_anyio_run):
+            r = runner.invoke(app, [
+                "serve",
+                "--spec", str(PETSTORE_SPEC),
+                "--config", cfg_path,
+                "--management-bind", "all",
+            ])
+
+        assert r.exit_code == 0, f"serve exited {r.exit_code}: {r.output}"
+        assert len(captured_cfg) == 1
+        assert captured_cfg[0].management.bind == "all"
+    finally:
+        os.unlink(cfg_path)
+
+
+def test_management_bind_all_without_token_exits_nonzero():
+    """--management-bind all without management_token_from in config must fail."""
+    cfg_yaml = textwrap.dedent("""\
+        version: "1"
+        spec:
+          source: ./spec.json
+    """)
+    with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+        f.write(cfg_yaml)
+        cfg_path = f.name
+
+    try:
+        with patch("specmcp.cli.serve.anyio.run"):
+            r = runner.invoke(app, [
+                "serve",
+                "--spec", str(PETSTORE_SPEC),
+                "--config", cfg_path,
+                "--management-bind", "all",
+            ])
+        assert r.exit_code != 0
+        assert "management_token_from" in r.output.lower() or "token" in r.output.lower()
+    finally:
+        os.unlink(cfg_path)
+
+
+# ---------------------------------------------------------------------------
+# CLI flags: --token-store / --token-store-path / --token-store-key-env
+# ---------------------------------------------------------------------------
+
+
+def test_serve_help_includes_token_store_flags():
+    """--token-store, --token-store-path, and --token-store-key-env appear in help."""
+    r = runner.invoke(app, ["serve", "--help"])
+    assert r.exit_code == 0
+    assert "--token-store" in r.output
+    assert "--token-store-path" in r.output
+    assert "--token-store-key-env" in r.output
+
+
+def test_token_store_invalid_value_exits_nonzero():
+    """--token-store bogus must fail before the pipeline runs."""
+    with patch("specmcp.cli.serve.anyio.run"):
+        r = runner.invoke(app, [
+            "serve",
+            "--spec", str(PETSTORE_SPEC),
+            "--token-store", "bogus",
+        ])
+    assert r.exit_code != 0
+    assert "memory" in r.output.lower() or "sqlite" in r.output.lower()
+
+
+def test_token_store_sqlite_without_key_env_exits_nonzero():
+    """--token-store sqlite without the key env var set must fail with a clear error."""
+    with patch("specmcp.cli.serve.anyio.run"), \
+         patch.dict(os.environ, {}, clear=True):
+        r = runner.invoke(app, [
+            "serve",
+            "--spec", str(PETSTORE_SPEC),
+            "--token-store", "sqlite",
+        ])
+    assert r.exit_code != 0
+    assert "SPECMCP_TOKEN_KEY" in r.output or "encryption key" in r.output.lower()
+
+
+def test_token_store_sqlite_with_key_env_reaches_anyio_run():
+    """--token-store sqlite + key env var set → pipeline succeeds and anyio.run is called."""
+    with patch("specmcp.cli.serve.anyio.run") as mock_run, \
+         patch.dict(os.environ, {"SPECMCP_TOKEN_KEY": "my-secret-key"}):
+        r = runner.invoke(app, [
+            "serve",
+            "--spec", str(PETSTORE_SPEC),
+            "--token-store", "sqlite",
+        ])
+    assert mock_run.called, f"anyio.run not called; output: {r.output}"
+    assert r.exit_code == 0
+
+
+def test_token_store_sqlite_args_threaded_to_anyio_run():
+    """sqlite_db_path and sqlite_key_bytes must be passed as positional args to anyio.run."""
+    captured: list = []
+
+    def _fake_anyio_run(fn, *args, **kwargs):
+        # positional args order to _run_server:
+        # registry, auth_injector, dispatch_cfg, cfg, transport, watch,
+        # config_path, spec_source, token_store_type, sqlite_db_path, sqlite_key_bytes
+        captured.extend(args)
+
+    with patch("specmcp.cli.serve.anyio.run", side_effect=_fake_anyio_run), \
+         patch.dict(os.environ, {"SPECMCP_TOKEN_KEY": "test-key-material"}):
+        r = runner.invoke(app, [
+            "serve",
+            "--spec", str(PETSTORE_SPEC),
+            "--token-store", "sqlite",
+            "--token-store-path", "/tmp/test_tokens.db",
+        ])
+
+    assert r.exit_code == 0, f"serve exited {r.exit_code}: {r.output}"
+    # token_store_type is args[8], sqlite_db_path is args[9], sqlite_key_bytes is args[10]
+    assert captured[8] == "sqlite"
+    assert captured[9] == Path("/tmp/test_tokens.db")
+    assert captured[10] == b"test-key-material"
+
+
+def test_token_store_sqlite_default_path_is_home_specmcp():
+    """Without --token-store-path, default is ~/.specmcp/tokens.db."""
+    captured: list = []
+
+    def _fake_anyio_run(fn, *args, **kwargs):
+        captured.extend(args)
+
+    with patch("specmcp.cli.serve.anyio.run", side_effect=_fake_anyio_run), \
+         patch.dict(os.environ, {"SPECMCP_TOKEN_KEY": "k"}):
+        r = runner.invoke(app, [
+            "serve",
+            "--spec", str(PETSTORE_SPEC),
+            "--token-store", "sqlite",
+        ])
+
+    assert r.exit_code == 0
+    expected_path = Path.home() / ".specmcp" / "tokens.db"
+    assert captured[9] == expected_path
+
+
+def test_build_oauth_state_uses_sqlite_store_when_requested():
+    """_build_oauth_state with token_store_type='sqlite' creates SqliteTokenStore instances."""
+    import textwrap, tempfile, os
+    from specmcp.cli.serve import _build_oauth_state
+    from specmcp.config import Config
+    from specmcp.auth.token_store import SqliteTokenStore
+
+    cfg_yaml = textwrap.dedent("""\
+        version: "2"
+        spec:
+          source: ./spec.json
+        auth:
+          myOAuth:
+            type: oauth2_authorization_code
+            authorization_url: https://auth.example.com/authorize
+            token_url: https://auth.example.com/token
+            client_id_from: env(TEST_CLIENT_ID)
+            client_secret_from: env(TEST_CLIENT_SECRET)
+            redirect_uri: http://localhost:8765/auth/callback
+    """)
+    with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+        f.write(cfg_yaml)
+        cfg_path = f.name
+
+    try:
+        with patch.dict(os.environ, {
+            "TEST_CLIENT_ID": "cid",
+            "TEST_CLIENT_SECRET": "csec",
+        }):
+            cfg = Config.load(Path(cfg_path))
+            injector = AuthInjector.build(cfg)
+            result = _build_oauth_state(
+                cfg,
+                injector,
+                "http://localhost:8765",
+                token_store_type="sqlite",
+                sqlite_db_path=Path("/tmp/test_oauth_tokens.db"),
+                sqlite_key_bytes=b"test-key-32-bytes-exactly-here!",
+            )
+
+        assert result is not None
+        store = result.schemes["myOAuth"].token_store
+        assert isinstance(store, SqliteTokenStore)
+    finally:
+        os.unlink(cfg_path)
+
+
+def test_build_oauth_state_uses_memory_store_by_default():
+    """_build_oauth_state with token_store_type='memory' (default) creates InMemoryTokenStore."""
+    import textwrap, tempfile, os
+    from specmcp.cli.serve import _build_oauth_state
+    from specmcp.config import Config
+    from specmcp.auth.token_store import InMemoryTokenStore
+
+    cfg_yaml = textwrap.dedent("""\
+        version: "2"
+        spec:
+          source: ./spec.json
+        auth:
+          myOAuth:
+            type: oauth2_authorization_code
+            authorization_url: https://auth.example.com/authorize
+            token_url: https://auth.example.com/token
+            client_id_from: env(TEST_CLIENT_ID)
+            client_secret_from: env(TEST_CLIENT_SECRET)
+            redirect_uri: http://localhost:8765/auth/callback
+    """)
+    with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+        f.write(cfg_yaml)
+        cfg_path = f.name
+
+    try:
+        with patch.dict(os.environ, {
+            "TEST_CLIENT_ID": "cid",
+            "TEST_CLIENT_SECRET": "csec",
+        }):
+            cfg = Config.load(Path(cfg_path))
+            injector = AuthInjector.build(cfg)
+            result = _build_oauth_state(cfg, injector, "http://localhost:8765")
+
+        assert result is not None
+        store = result.schemes["myOAuth"].token_store
+        assert isinstance(store, InMemoryTokenStore)
+    finally:
+        os.unlink(cfg_path)

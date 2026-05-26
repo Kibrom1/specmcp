@@ -31,19 +31,10 @@ from specmcp.errors import ConfigEnvVarError, ConfigError, ConfigVersionError
 _ENV_VAR_RE = re.compile(r"^env\(([A-Z_][A-Z0-9_]*)\)$")
 SUPPORTED_CONFIG_VERSIONS = {"1", "2"}
 
-# ---------------------------------------------------------------------------
-# OAuth field-level validation constants
-# ---------------------------------------------------------------------------
-
-# Fields that specmcp controls; operators must not inject them via extra_params.
+# OAuth params that must never appear in extra_params (they are set by specmcp)
 _RESERVED_OAUTH_PARAMS = frozenset({
-    "grant_type",
-    "code",
-    "code_verifier",
-    "redirect_uri",
-    "client_id",
-    "client_secret",
-    "response_type",
+    "grant_type", "code", "code_verifier", "redirect_uri",
+    "client_id", "client_secret", "response_type",
 })
 
 
@@ -136,35 +127,28 @@ class BearerAuthConfig(BaseModel):
 
 
 def _validate_token_url(url: str, field_name: str = "token_url") -> str:
-    """Enforce https:// on token/auth URLs.
+    """Validate that *url* uses https:// (or http://localhost for testing).
 
-    Allows http:// only for localhost/127.0.0.1/::1 (local dev/testing).
-    Raises ValueError on violation — Pydantic converts this to a ConfigError
-    via the model_validator in Config.parse_auth_schemes.
+    Raises ConfigError if the URL is not acceptable.
     """
-    if url.startswith("https://"):
+    lower = url.lower()
+    if lower.startswith("https://"):
         return url
-    if url.startswith("http://"):
-        from urllib.parse import urlparse
-        host = urlparse(url).hostname or ""
-        if host in ("localhost", "127.0.0.1", "::1"):
-            return url
-        raise ValueError(
-            f"{field_name} must use https:// in production environments. "
-            f"Got: {url!r}. HTTP is only allowed for localhost."
-        )
-    raise ValueError(
-        f"{field_name} must start with https:// (or http://localhost for dev). Got: {url!r}"
+    if lower.startswith("http://localhost") or lower.startswith("http://127.0.0.1"):
+        return url
+    raise ConfigError(
+        f"'{field_name}' must use https:// (got {url!r}). "
+        "OAuth token endpoints must be encrypted."
     )
 
 
 def _validate_extra_params(v: dict[str, str]) -> dict[str, str]:
     """Reject reserved OAuth parameter names in extra_params."""
-    reserved = _RESERVED_OAUTH_PARAMS & v.keys()
+    reserved = _RESERVED_OAUTH_PARAMS & set(v)
     if reserved:
-        raise ValueError(
-            f"extra_params must not contain reserved OAuth fields: {sorted(reserved)}. "
-            f"These are controlled by specmcp and cannot be overridden."
+        raise ConfigError(
+            f"extra_params must not include reserved OAuth fields: "
+            f"{sorted(reserved)}. These are set automatically by specmcp."
         )
     return v
 
@@ -198,58 +182,83 @@ class OAuth2ClientCredentialsConfig(BaseModel):
 
     @field_validator("token_url")
     @classmethod
-    def check_token_url_scheme(cls, v: str) -> str:
+    def validate_token_url(cls, v: str) -> str:
         return _validate_token_url(v, "token_url")
 
     @field_validator("extra_params")
     @classmethod
-    def check_extra_params(cls, v: dict[str, str]) -> dict[str, str]:
+    def validate_extra_params(cls, v: dict[str, str]) -> dict[str, str]:
         return _validate_extra_params(v)
 
 
 class OAuth2AuthorizationCodeConfig(BaseModel):
-    """OAuth 2.0 Authorization Code + PKCE flow (version "2" configs only).
+    """OAuth 2.0 Authorization Code + PKCE flow (requires config version '2').
 
-    Each user authenticates via their own browser. specmcp issues a single-use
-    login URL, the user logs in, and specmcp stores per-session tokens in a
-    TokenStore.
+    Used for user-delegated auth where the MCP session holder must personally
+    authenticate. specmcp issues a single-use login URL to the LLM, which
+    forwards it to the user.
 
-    Requires config version "2".
+    Example mcp.config.yaml (version: "2" required)::
+
+        auth:
+          myUserAuth:
+            type: oauth2_authorization_code
+            authorization_url: https://auth.example.com/authorize
+            token_url: https://auth.example.com/oauth/token
+            client_id_from: env(MY_CLIENT_ID)
+            client_secret_from: env(MY_CLIENT_SECRET)
+            redirect_uri: https://my-specmcp-host.example.com/oauth/callback
+            scopes:
+              - openid
+              - profile
     """
 
     type: Literal["oauth2_authorization_code"]
-    authorization_url: str      # must be https:// (or localhost)
-    token_url: str              # must be https:// (or localhost)
+    authorization_url: str
+    token_url: str
     client_id_from: str
-    client_secret_from: str | None = None   # optional for public clients
-    scopes: list[str] = Field(default_factory=list)
+    client_secret_from: str
     redirect_uri: str
-    token_store: Literal["memory", "sqlite"] = "memory"
-    token_store_path: str | None = None
-    token_store_key_from: str | None = None  # required when token_store=sqlite
+    scopes: list[str] = Field(default_factory=list)
     extra_params: dict[str, str] = Field(default_factory=dict)
-
-    @field_validator("authorization_url")
-    @classmethod
-    def check_authorization_url_scheme(cls, v: str) -> str:
-        return _validate_token_url(v, "authorization_url")
 
     @field_validator("token_url")
     @classmethod
-    def check_token_url_scheme(cls, v: str) -> str:
+    def validate_token_url(cls, v: str) -> str:
         return _validate_token_url(v, "token_url")
+
+    @field_validator("authorization_url")
+    @classmethod
+    def validate_authorization_url(cls, v: str) -> str:
+        return _validate_token_url(v, "authorization_url")
 
     @field_validator("extra_params")
     @classmethod
-    def check_extra_params(cls, v: dict[str, str]) -> dict[str, str]:
+    def validate_extra_params(cls, v: dict[str, str]) -> dict[str, str]:
         return _validate_extra_params(v)
 
+
+class ManagementConfig(BaseModel):
+    """Configuration for the OAuth callback / management HTTP endpoint.
+
+    The management server handles the OAuth redirect callback and issues
+    tokens to sessions. It must be reachable from the browser after the
+    user completes the OAuth flow.
+
+    bind: loopback — only reachable from 127.0.0.1/::1 (default, safe for single-host)
+    bind: all      — reachable from any interface; management_token_from is required
+    """
+
+    bind: Literal["loopback", "all"] = "loopback"
+    port: int = Field(default=8766, ge=1024, le=65535)
+    management_token_from: str | None = None  # env(VAR_NAME); required if bind=all
+
     @model_validator(mode="after")
-    def check_sqlite_requires_key(self) -> "OAuth2AuthorizationCodeConfig":
-        if self.token_store == "sqlite" and not self.token_store_key_from:
+    def check_all_requires_token(self) -> "ManagementConfig":
+        if self.bind == "all" and not self.management_token_from:
             raise ValueError(
-                "token_store_key_from is required when token_store is 'sqlite'. "
-                "Set it to env(TOKEN_STORE_KEY) and export the variable."
+                "management_token_from is required when bind is 'all'. "
+                "Set it to env(SPECMCP_MANAGEMENT_TOKEN)."
             )
         return self
 
@@ -383,31 +392,6 @@ class TelemetryConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Management endpoint config (version "2" only)
-# ---------------------------------------------------------------------------
-
-
-class ManagementConfig(BaseModel):
-    """Controls access to the management HTTP endpoint (DELETE /auth/session/<id>).
-
-    bind: loopback — only reachable from 127.0.0.1/::1 (default, safe for single-host)
-    bind: all      — reachable from any interface; management_token_from is required
-    """
-
-    bind: Literal["loopback", "all"] = "loopback"
-    management_token_from: str | None = None  # env(VAR_NAME); required if bind=all
-
-    @model_validator(mode="after")
-    def check_all_requires_token(self) -> "ManagementConfig":
-        if self.bind == "all" and not self.management_token_from:
-            raise ValueError(
-                "management_token_from is required when bind is 'all'. "
-                "Set it to env(SPECMCP_MANAGEMENT_TOKEN)."
-            )
-        return self
-
-
-# ---------------------------------------------------------------------------
 # Top-level Config
 # ---------------------------------------------------------------------------
 
@@ -425,7 +409,6 @@ class Config(BaseModel):
     transport: TransportConfig = Field(default_factory=TransportConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
-
     management: ManagementConfig = Field(default_factory=ManagementConfig)
 
     # Parsed auth schemes (populated after load)
@@ -459,16 +442,16 @@ class Config(BaseModel):
                 elif scheme_type == "oauth2_authorization_code":
                     if self.version != "2":
                         raise ConfigError(
-                            f"Auth scheme '{name}': type 'oauth2_authorization_code' requires "
-                            f"config version \"2\". Your config uses version {self.version!r}. "
-                            f"Update the 'version' key to \"2\" to enable this feature."
+                            f"Auth scheme '{name}': type 'oauth2_authorization_code' "
+                            f"requires config version '2' but found version '{self.version}'. "
+                            f"Set 'version: \"2\"' at the top of your mcp.config.yaml."
                         )
                     parsed[name] = OAuth2AuthorizationCodeConfig.model_validate(raw)
                 else:
                     raise ConfigError(
                         f"Auth scheme '{name}': unsupported type {scheme_type!r}. "
                         f"Supported: apiKey, bearer, oauth2_client_credentials, "
-                        f"oauth2_authorization_code (requires version \"2\")."
+                        f"oauth2_authorization_code (version 2+)."
                     )
             except Exception as exc:
                 if isinstance(exc, ConfigError):
@@ -485,9 +468,9 @@ class Config(BaseModel):
     def resolve_auth_values(self) -> dict[str, SensitiveStr]:
         """Resolve static auth env vars. Raises ConfigEnvVarError if any are missing.
 
-        OAuth2ClientCredentialsConfig schemes are intentionally excluded: their
-        client_id and client_secret are resolved lazily by AuthInjector.build()
-        so they can be stored as SensitiveStr on ResolvedScheme.
+        OAuth2 schemes (client_credentials and authorization_code) are intentionally
+        excluded: their client_id and client_secret are resolved lazily by
+        AuthInjector.build() so they can be stored as SensitiveStr on ResolvedScheme.
 
         Call this at startup (validate / serve), not at config load time,
         so that ``init`` and ``inspect`` can work without real credentials.

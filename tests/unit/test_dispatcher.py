@@ -512,62 +512,97 @@ async def test_dispatch_invalid_args_raises_argument_validation_error():
 
 
 # ---------------------------------------------------------------------------
-# Session passthrough (Phase 1 plumbing — no behaviour change)
+# Session passthrough — dispatcher forwards session to auth injector
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_dispatch_session_none_no_regression():
-    """dispatch() with session=None is identical to not passing session (v1 behaviour)."""
+async def test_dispatch_passes_session_to_injector():
+    """dispatch() must forward the session kwarg to auth_injector.inject()."""
+    from specmcp.config import BearerAuthConfig, SensitiveStr
+    from specmcp.auth.injector import ResolvedScheme
     from specmcp.runtime.session import SessionContext
 
-    op = _make_op(path="/pets/{petId}")
-    arg_map = ArgumentMap(bindings={
-        "petId": ArgumentBinding(
-            source_llm_key="petId",
-            target_kind="path",
-            target_path=["petId"],
-        )
-    })
-    tool = _make_tool(op, arg_map)
-    client = _mock_http_client(_fake_http_response())
-
-    result = await dispatch(
-        tool=tool,
-        llm_args={"petId": 1},
-        http_client=client,
-        auth_injector=_no_auth_injector(),
-        dispatch_config=_dispatch_cfg(),
-        session=None,
+    op = _make_op(
+        method="GET",
+        path="/items",
+        auth=[[AuthRequirement(scheme_name="myBearer")]],
     )
-    assert result[0]["text"].strip()  # non-empty result
-    client.request.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_dispatch_session_context_passed_without_error():
-    """dispatch() accepts a SessionContext without breaking existing behaviour."""
-    from specmcp.runtime.session import SessionContext
-
-    op = _make_op(path="/pets/{petId}")
-    arg_map = ArgumentMap(bindings={
-        "petId": ArgumentBinding(
-            source_llm_key="petId",
-            target_kind="path",
-            target_path=["petId"],
-        )
-    })
+    arg_map = ArgumentMap(bindings={})
     tool = _make_tool(op, arg_map)
-    client = _mock_http_client(_fake_http_response())
-    session = SessionContext(session_id="test-session-id-1234")
+    client = _mock_http_client(_fake_http_response('{"ok": true}'))
 
-    result = await dispatch(
+    # Build an injector with a static bearer token
+    cfg = BearerAuthConfig(type="bearer", value_from="env(X)")
+    resolved = ResolvedScheme(
+        scheme_name="myBearer",
+        config=cfg,
+        credential=SensitiveStr("static-token"),
+    )
+    injector = AuthInjector(_schemes={"myBearer": resolved}, _token_caches={})
+
+    # Session with a client_token — should override static token
+    session = SessionContext(session_id="sid", client_token=SensitiveStr("session-token"))
+
+    captured_headers: dict = {}
+
+    async def _fake_request(**kwargs: Any) -> HttpResponse:
+        captured_headers.update(kwargs.get("headers", {}))
+        return _fake_http_response('{"ok": true}')
+
+    client.request = AsyncMock(side_effect=_fake_request)
+
+    await dispatch(
         tool=tool,
-        llm_args={"petId": 99},
+        llm_args={},
         http_client=client,
-        auth_injector=_no_auth_injector(),
+        auth_injector=injector,
         dispatch_config=_dispatch_cfg(),
         session=session,
     )
-    assert result[0]["text"].strip()
-    client.request.assert_called_once()
+
+    # client_token takes priority over static token
+    assert captured_headers.get("Authorization") == "Bearer session-token"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_session_none_uses_static_token():
+    """dispatch() with session=None falls back to static bearer credential."""
+    from specmcp.config import BearerAuthConfig, SensitiveStr
+    from specmcp.auth.injector import ResolvedScheme
+
+    op = _make_op(
+        method="GET",
+        path="/items",
+        auth=[[AuthRequirement(scheme_name="myBearer")]],
+    )
+    arg_map = ArgumentMap(bindings={})
+    tool = _make_tool(op, arg_map)
+
+    cfg = BearerAuthConfig(type="bearer", value_from="env(X)")
+    resolved = ResolvedScheme(
+        scheme_name="myBearer",
+        config=cfg,
+        credential=SensitiveStr("env-token"),
+    )
+    injector = AuthInjector(_schemes={"myBearer": resolved}, _token_caches={})
+
+    captured_headers: dict = {}
+
+    async def _fake_request(**kwargs: Any) -> HttpResponse:
+        captured_headers.update(kwargs.get("headers", {}))
+        return _fake_http_response('{"ok": true}')
+
+    client = _mock_http_client(_fake_http_response())
+    client.request = AsyncMock(side_effect=_fake_request)
+
+    await dispatch(
+        tool=tool,
+        llm_args={},
+        http_client=client,
+        auth_injector=injector,
+        dispatch_config=_dispatch_cfg(),
+        session=None,  # explicitly no session
+    )
+
+    assert captured_headers.get("Authorization") == "Bearer env-token"
