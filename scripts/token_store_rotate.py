@@ -10,7 +10,7 @@ successfully re-encrypted.
 Usage::
 
     python scripts/token_store_rotate.py \\
-        --db tokens.db \\
+        --db ~/.specmcp/tokens.db \\
         --old-key <hex> \\
         --new-key <hex>
 
@@ -18,6 +18,18 @@ The --old-key and --new-key arguments accept 64-hex-digit (32-byte) keys.
 If either is omitted, the script falls back to environment variables:
   TOKEN_STORE_KEY      — old (current) key
   TOKEN_STORE_KEY_NEW  — new key
+
+Multi-scheme usage:
+  When ``--token-store sqlite`` is used with multiple ``oauth2_authorization_code``
+  schemes, specmcp creates one database file per scheme beside the base path::
+
+      ~/.specmcp/tokens_myScheme.db
+      ~/.specmcp/tokens_otherScheme.db
+
+  Run this script once for each file::
+
+      python scripts/token_store_rotate.py --db ~/.specmcp/tokens_myScheme.db ...
+      python scripts/token_store_rotate.py --db ~/.specmcp/tokens_otherScheme.db ...
 
 Exit codes:
   0  All rows rotated successfully.
@@ -125,7 +137,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Re-encrypt a specmcp SQLite token store with a new AES-256-GCM key."
     )
-    parser.add_argument("--db", required=True, help="Path to tokens.db")
+    parser.add_argument(
+        "--db",
+        required=True,
+        help=(
+            "Path to the SQLite token store file (e.g. ~/.specmcp/tokens.db). "
+            "For multi-scheme setups specmcp creates one file per scheme "
+            "(e.g. tokens_myScheme.db); run this script once per file."
+        ),
+    )
     parser.add_argument("--old-key", help="Current 32-byte key as 64 hex chars")
     parser.add_argument("--new-key", help="New 32-byte key as 64 hex chars")
     args = parser.parse_args()

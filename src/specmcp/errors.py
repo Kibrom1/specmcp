@@ -385,6 +385,16 @@ MCP_ERROR_CONTENT: dict[type[SpecmcpError], str] = {
 
 def mcp_error_content(exc: SpecmcpError) -> str:
     """Format the human-readable MCP error content block text."""
+    # Special case: AuthRequiredError with no login URL (nonce issuance failed).
+    # The generic template would render {exc.login_url} as the literal string
+    # "None", which is misleading. Return a distinct, actionable message instead.
+    if isinstance(exc, AuthRequiredError) and not exc.login_url:
+        return (
+            "Authentication required, but the login URL could not be generated "
+            "(the server may be overloaded or misconfigured). "
+            "Please check the server logs and try the request again."
+        )
+
     request_id = exc.request_id or "unknown"
     for cls in type(exc).__mro__:
         if cls in MCP_ERROR_CONTENT:

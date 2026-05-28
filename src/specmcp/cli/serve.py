@@ -137,8 +137,10 @@ def serve_cmd(
         None,
         "--management-port",
         help=(
-            "Override management endpoint port (default: 8766). "
-            "Only relevant with HTTP transport and OAuth2 authorization_code schemes."
+            "Override management.port in the config (default: 8766). "
+            "NOTE: this field is currently reserved — management routes run on the same "
+            "port as the HTTP transport and this value has no routing effect yet. "
+            "It will take effect in a future release when management gets a dedicated listener."
         ),
     ),
     management_bind: Optional[str] = typer.Option(  # noqa: UP007
@@ -163,7 +165,9 @@ def serve_cmd(
         None,
         "--token-store-path",
         help=(
-            "Path to the SQLite token database (default: ~/.specmcp/tokens.db). "
+            "Base path for the SQLite token database (default: ~/.specmcp/tokens.db). "
+            "For multi-scheme configs each scheme gets its own file derived from this "
+            "path (e.g. tokens_myScheme.db beside tokens.db). "
             "Only used when --token-store sqlite is set."
         ),
     ),
@@ -218,6 +222,14 @@ def serve_cmd(
         )
         raise typer.Exit(64)
 
+    if management_port is not None:
+        typer.echo(
+            "Warning: --management-port sets management.port in the config but currently has "
+            "no routing effect — management routes run on the HTTP transport port. "
+            "This will take effect in a future release.",
+            err=True,
+        )
+
     if cfg is not None and (management_port is not None or management_bind is not None):
         from specmcp.config import ManagementConfig
         try:
@@ -262,6 +274,17 @@ def serve_cmd(
             )
             raise typer.Exit(64)
         sqlite_key_bytes = key_raw.encode()
+
+        # Warn if the key material is suspiciously short.
+        # HKDF will still work, but short passphrases have low entropy.
+        # 16 bytes ≈ 128-bit minimum; 32+ bytes is recommended.
+        if len(sqlite_key_bytes) < 16:
+            typer.echo(
+                f"Warning: {token_store_key_env!r} is only {len(sqlite_key_bytes)} bytes — "
+                "consider using at least 16 characters for adequate key strength. "
+                "The store will still be created, but encryption strength is limited.",
+                err=True,
+            )
 
     # --- Full pipeline (initial load) ---
     try:

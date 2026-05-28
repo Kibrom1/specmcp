@@ -232,6 +232,11 @@ class OAuth2AuthorizationCodeConfig(BaseModel):
     def validate_authorization_url(cls, v: str) -> str:
         return _validate_token_url(v, "authorization_url")
 
+    @field_validator("redirect_uri")
+    @classmethod
+    def validate_redirect_uri(cls, v: str) -> str:
+        return _validate_token_url(v, "redirect_uri")
+
     @field_validator("extra_params")
     @classmethod
     def validate_extra_params(cls, v: dict[str, str]) -> dict[str, str]:
@@ -239,14 +244,18 @@ class OAuth2AuthorizationCodeConfig(BaseModel):
 
 
 class ManagementConfig(BaseModel):
-    """Configuration for the OAuth callback / management HTTP endpoint.
+    """Configuration for the OAuth management endpoint access control.
 
-    The management server handles the OAuth redirect callback and issues
-    tokens to sessions. It must be reachable from the browser after the
-    user completes the OAuth flow.
+    Controls who may call the management-only route (DELETE /auth/session/<id>).
+    These routes are served on the same port as the main HTTP transport.
 
     bind: loopback — only reachable from 127.0.0.1/::1 (default, safe for single-host)
     bind: all      — reachable from any interface; management_token_from is required
+
+    Note on ``port``: this field is **reserved for a future release** in which the
+    management routes will be served on a separate port from the MCP transport.
+    Currently it has no routing effect — management routes always run on the same
+    port as the HTTP transport (``transport.http.port``).
     """
 
     bind: Literal["loopback", "all"] = "loopback"

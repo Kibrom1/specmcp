@@ -1,0 +1,100 @@
+# specmcp example — OAuth2 Authorization Code + PKCE
+#
+# This config shows how to expose an API that requires OAuth2 user login
+# (e.g. Google APIs, Salesforce, any IdP-secured service).
+#
+# How it works:
+#   1. The MCP client calls a tool requiring OAuth2.
+#   2. specmcp raises AuthRequiredError with a login URL.
+#   3. The client shows the user the URL; they log in via their browser.
+#   4. The browser is redirected to /auth/callback where specmcp exchanges
+#      the code for tokens and stores them.
+#   5. Subsequent tool calls inject the Bearer token automatically.
+#      Silent refresh happens when the token expires.
+#
+# Prerequisites:
+#   - Register an OAuth2 application with your identity provider.
+#   - Set the redirect URI to: http://localhost:8765/auth/callback
+#   - Set the required environment variables listed below.
+#
+# Run (single scheme, in-memory tokens):
+#   export MYAPP_CLIENT_ID=...
+#   export MYAPP_CLIENT_SECRET=...
+#   specmcp serve --config examples/oauth2-example/mcp.config.yaml --transport http
+#
+# Run (with persistent encrypted tokens):
+#   export MYAPP_CLIENT_ID=...
+#   export MYAPP_CLIENT_SECRET=...
+#   export SPECMCP_TOKEN_KEY="a-long-random-passphrase-used-as-key-material"
+#   specmcp serve \
+#     --config examples/oauth2-example/mcp.config.yaml \
+#     --transport http \
+#     --token-store sqlite \
+#     --token-store-path ~/.specmcp/myapp-tokens.db
+
+version: "2"
+
+spec:
+  # Replace with your API's OpenAPI spec URL or local path.
+  source: "https://api.example.com/openapi.json"
+
+# ---------------------------------------------------------------------------
+# Auth — OAuth2 Authorization Code with PKCE
+# ---------------------------------------------------------------------------
+auth:
+  myAppAuth:
+    type: oauth2_authorization_code
+
+    # Your identity provider's authorization endpoint.
+    authorization_url: "https://auth.example.com/oauth2/authorize"
+
+    # Your identity provider's token endpoint.
+    token_url: "https://auth.example.com/oauth2/token"
+
+    # Client credentials — resolve from environment variables.
+    # Never put secrets directly in config files.
+    client_id_from: env(MYAPP_CLIENT_ID)
+    client_secret_from: env(MYAPP_CLIENT_SECRET)
+
+    # Must match the redirect URI registered with your identity provider.
+    # For local development, use http://localhost:{port}/auth/callback.
+    redirect_uri: "http://localhost:8765/auth/callback"
+
+    # Scopes to request. Adjust to match your application's needs.
+    scopes:
+      - openid
+      - profile
+      - "api:read"
+      - "api:write"
+
+# ---------------------------------------------------------------------------
+# Transport — HTTP/SSE required for OAuth2 (stdio has no browser redirect)
+# ---------------------------------------------------------------------------
+transport:
+  default: http
+  http:
+    host: "127.0.0.1"   # Change to "0.0.0.0" to expose on all interfaces
+    port: 8765
+
+# ---------------------------------------------------------------------------
+# Management endpoint — controls DELETE /auth/session/<id> (logout)
+# ---------------------------------------------------------------------------
+management:
+  # loopback: DELETE /auth/session only reachable from 127.0.0.1 (safe default)
+  # all:      reachable from any interface — requires management_token_from below
+  bind: loopback
+  port: 8766
+
+  # Required when bind: all. Set to: env(SPECMCP_MANAGEMENT_TOKEN)
+  # management_token_from: env(SPECMCP_MANAGEMENT_TOKEN)
+
+# ---------------------------------------------------------------------------
+# Optional: operation filters, timeouts, simplification
+# ---------------------------------------------------------------------------
+dispatch:
+  default_timeout_seconds: 30
+  tls_verify: true
+
+simplify:
+  truncate_description_chars: 400
+  drop_spec_metadata: true

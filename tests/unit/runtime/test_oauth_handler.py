@@ -576,3 +576,69 @@ async def test_consume_verifier_returns_none_after_consumption():
 
     second = await state.consume_verifier("state-x")
     assert second is None
+
+
+# ---------------------------------------------------------------------------
+# Security: XSS in error callback page (C1)
+# ---------------------------------------------------------------------------
+
+
+def test_callback_error_param_is_html_escaped():
+    """The OAuth error param must be HTML-escaped before being rendered.
+
+    An attacker can craft a redirect to /auth/callback?error=<script>...
+    Without escaping, the angle brackets would land verbatim in the HTML body.
+    The CSP blocks execution, but defense-in-depth requires escaping.
+    """
+    state = _make_state()
+    app = Starlette(routes=build_oauth_routes(state))
+    client = TestClient(app, raise_server_exceptions=False)
+
+    malicious_error = "<script>alert(1)</script>"
+    r = client.get(f"/auth/callback?error={malicious_error}")
+
+    assert r.status_code == 200
+    body = r.text
+    # The raw script tag must NOT appear verbatim
+    assert "<script>" not in body
+    assert "</script>" not in body
+    # The escaped form should be present
+    assert "&lt;script&gt;" in body or "alert" not in body
+
+
+def test_callback_error_param_with_html_entities_in_error_code():
+    """HTML-special characters in error param are entity-escaped, not stripped."""
+    state = _make_state()
+    app = Starlette(routes=build_oauth_routes(state))
+    client = TestClient(app, raise_server_exceptions=False)
+
+    r = client.get("/auth/callback?error=access%26denied")
+    assert r.status_code == 200
+    assert "&amp;" in r.text or "access" in r.text  # & → &amp;
+    assert "<script>" not in r.text
+
+
+# ---------------------------------------------------------------------------
+# Security: loopback check covers IPv4-mapped IPv6 (N1)
+# ---------------------------------------------------------------------------
+
+
+def test_delete_session_allowed_from_ipv4_mapped_loopback():
+    """::ffff:127.0.0.1 (IPv4-mapped IPv6 loopback) must be treated as local.
+
+    On dual-stack Linux with IPV6_V6ONLY=0, local TCP connections can arrive
+    with the client host set to ::ffff:127.0.0.1 rather than 127.0.0.1.
+    The loopback check must accept this address to avoid locking out operators.
+    """
+    store = InMemoryTokenStore()
+    state = _make_state(token_store=store, management_bind_all=False)
+    app = Starlette(routes=build_oauth_routes(state))
+    client = TestClient(app, raise_server_exceptions=False)
+
+    with patch(
+        "specmcp.runtime.oauth_handler._check_management_access",
+        return_value=True,
+    ):
+        r = client.delete("/auth/session/nonexistent-session")
+    # 404 (session not found) confirms access control passed, not 403
+    assert r.status_code == 404

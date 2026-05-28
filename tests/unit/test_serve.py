@@ -658,6 +658,19 @@ def test_management_port_flag_overrides_cfg():
         os.unlink(cfg_path)
 
 
+def test_management_port_flag_emits_no_routing_effect_warning():
+    """--management-port must warn that the port has no routing effect yet."""
+    with patch("specmcp.cli.serve.anyio.run"):
+        r = runner.invoke(app, [
+            "serve",
+            "--spec", str(PETSTORE_SPEC),
+            "--management-port", "9000",
+        ])
+    assert r.exit_code == 0
+    output = r.output.lower()
+    assert "no routing effect" in output or "future" in output
+
+
 def test_management_bind_flag_overrides_cfg():
     """--management-bind all must override cfg.management.bind before _run_server."""
     cfg_yaml = textwrap.dedent("""\
@@ -796,6 +809,32 @@ def test_token_store_sqlite_args_threaded_to_anyio_run():
     assert captured[10] == b"test-key-material"
 
 
+def test_token_store_key_weak_emits_warning():
+    """A key shorter than 16 bytes must emit a warning (but still proceed)."""
+    with patch("specmcp.cli.serve.anyio.run"), \
+         patch.dict(os.environ, {"SPECMCP_TOKEN_KEY": "short"}):
+        r = runner.invoke(app, [
+            "serve",
+            "--spec", str(PETSTORE_SPEC),
+            "--token-store", "sqlite",
+        ])
+    assert r.exit_code == 0
+    assert "warning" in r.output.lower() or "5 bytes" in r.output.lower()
+
+
+def test_token_store_key_adequate_length_no_warning():
+    """A key of 16+ bytes must NOT emit the entropy warning."""
+    with patch("specmcp.cli.serve.anyio.run"), \
+         patch.dict(os.environ, {"SPECMCP_TOKEN_KEY": "sixteen-bytes-ok"}):
+        r = runner.invoke(app, [
+            "serve",
+            "--spec", str(PETSTORE_SPEC),
+            "--token-store", "sqlite",
+        ])
+    assert r.exit_code == 0
+    assert "warning" not in r.output.lower() or "token_key" not in r.output.lower()
+
+
 def test_token_store_sqlite_default_path_is_home_specmcp():
     """Without --token-store-path, default is ~/.specmcp/tokens.db."""
     captured: list = []
@@ -899,5 +938,127 @@ def test_build_oauth_state_uses_memory_store_by_default():
         assert result is not None
         store = result.schemes["myOAuth"].token_store
         assert isinstance(store, InMemoryTokenStore)
+    finally:
+        os.unlink(cfg_path)
+
+
+# ---------------------------------------------------------------------------
+# --token-store-key-env with a non-default env var name
+# ---------------------------------------------------------------------------
+
+
+def test_token_store_key_env_custom_name():
+    """--token-store-key-env MY_KEY should read from MY_KEY, not SPECMCP_TOKEN_KEY."""
+    captured: list = []
+
+    def _fake_anyio_run(fn, *args, **kwargs):
+        captured.extend(args)
+
+    with patch("specmcp.cli.serve.anyio.run", side_effect=_fake_anyio_run), \
+         patch.dict(os.environ, {
+             "MY_CUSTOM_KEY": "custom-key-material",
+             # Deliberately NOT setting SPECMCP_TOKEN_KEY to prove the custom var is used
+         }, clear=False):
+        r = runner.invoke(app, [
+            "serve",
+            "--spec", str(PETSTORE_SPEC),
+            "--token-store", "sqlite",
+            "--token-store-key-env", "MY_CUSTOM_KEY",
+        ])
+
+    assert r.exit_code == 0, f"serve exited {r.exit_code}: {r.output}"
+    # sqlite_key_bytes is args[10]
+    assert captured[10] == b"custom-key-material"
+
+
+def test_token_store_sqlite_missing_custom_key_env_exits_nonzero():
+    """--token-store-key-env MY_KEY with MY_KEY unset must fail (not fall back to SPECMCP_TOKEN_KEY)."""
+    with patch("specmcp.cli.serve.anyio.run"), \
+         patch.dict(os.environ, {
+             "SPECMCP_TOKEN_KEY": "fallback-key",  # present, but should NOT be used
+         }, clear=False):
+        r = runner.invoke(app, [
+            "serve",
+            "--spec", str(PETSTORE_SPEC),
+            "--token-store", "sqlite",
+            "--token-store-key-env", "MY_MISSING_KEY",
+        ])
+    assert r.exit_code != 0
+    assert "MY_MISSING_KEY" in r.output
+
+
+# ---------------------------------------------------------------------------
+# _run_http: token stores are closed even when uvicorn raises
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_http_closes_stores_when_uvicorn_raises():
+    """Token stores must be closed via finally even if uvicorn.Server.serve() raises."""
+    import textwrap, tempfile, os
+    from specmcp.cli.serve import _run_http
+    from specmcp.config import Config, DispatchConfig
+    from specmcp.runtime.registry_ref import RegistryRef
+
+    cfg_yaml = textwrap.dedent("""\
+        version: "2"
+        spec:
+          source: ./spec.json
+        auth:
+          myOAuth:
+            type: oauth2_authorization_code
+            authorization_url: https://auth.example.com/authorize
+            token_url: https://auth.example.com/token
+            client_id_from: env(TEST_CLIENT_ID)
+            client_secret_from: env(TEST_CLIENT_SECRET)
+            redirect_uri: http://localhost:8765/auth/callback
+    """)
+    with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+        f.write(cfg_yaml)
+        cfg_path = f.name
+
+    try:
+        with patch.dict(os.environ, {
+            "TEST_CLIENT_ID": "cid",
+            "TEST_CLIENT_SECRET": "csec",
+        }):
+            cfg = Config.load(Path(cfg_path))
+
+        registry = _make_registry_with_one_tool()
+        registry_ref = RegistryRef(registry)
+        injector = AuthInjector.build(cfg)
+        dispatch_cfg = DispatchConfig()
+
+        open_calls: list[str] = []
+        close_calls: list[str] = []
+
+        # Patch InMemoryTokenStore to track open/close calls
+        from specmcp.auth.token_store import InMemoryTokenStore
+
+        original_open = InMemoryTokenStore.open
+        original_close = InMemoryTokenStore.close
+
+        async def _tracked_open(self):
+            open_calls.append("open")
+            return await original_open(self)
+
+        async def _tracked_close(self):
+            close_calls.append("close")
+            return await original_close(self)
+
+        # Keep env vars in scope for the full async call (including _build_oauth_state)
+        with patch.dict(os.environ, {"TEST_CLIENT_ID": "cid", "TEST_CLIENT_SECRET": "csec"}), \
+             patch.object(InMemoryTokenStore, "open", _tracked_open), \
+             patch.object(InMemoryTokenStore, "close", _tracked_close), \
+             patch("uvicorn.Config", return_value=MagicMock()), \
+             patch("uvicorn.Server", return_value=AsyncMock(serve=AsyncMock(side_effect=RuntimeError("boom")))):
+            from specmcp.runtime.http_client import HttpClient
+            with pytest.raises(RuntimeError, match="boom"):
+                async with HttpClient(dispatch_cfg) as http_client:
+                    await _run_http(registry_ref, http_client, injector, dispatch_cfg, cfg)
+
+        # close() must have been called despite the exception
+        assert len(close_calls) == 1, "store.close() must be called in finally block"
+        assert len(open_calls) == 1, "store.open() must have been called before serve"
     finally:
         os.unlink(cfg_path)

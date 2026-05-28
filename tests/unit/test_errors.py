@@ -218,6 +218,38 @@ def test_mcp_content_dispatch_says_internal():
     assert "ArgumentMap" not in content
 
 
+def test_mcp_content_auth_required_with_login_url():
+    """AuthRequiredError with a login URL must embed the URL in the message."""
+    from specmcp.errors import AuthRequiredError
+    exc = AuthRequiredError(
+        "Need login",
+        session_id="sess-123",
+        login_url="http://localhost:8765/auth/login?nonce=abc",
+    )
+    content = mcp_error_content(exc)
+    assert "http://localhost:8765/auth/login?nonce=abc" in content
+    assert "None" not in content
+
+
+def test_mcp_content_auth_required_without_login_url_does_not_say_none():
+    """AuthRequiredError with login_url=None must NOT render the literal 'None'.
+
+    When nonce issuance fails, login_url is None. The generic template
+    would produce 'visit the following URL:\nNone\n' which is confusing.
+    The fallback message must be coherent and not mention 'None'.
+    """
+    from specmcp.errors import AuthRequiredError
+    exc = AuthRequiredError(
+        "Auth required but nonce failed",
+        session_id="sess-456",
+        login_url=None,
+    )
+    content = mcp_error_content(exc)
+    assert "None" not in content
+    # Should still convey that auth is needed and give a next step
+    assert "authentication" in content.lower() or "login" in content.lower()
+
+
 def test_to_dict_roundtrip():
     exc = SpecSyntaxError(
         "bad YAML",

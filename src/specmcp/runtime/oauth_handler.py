@@ -325,9 +325,13 @@ async def _handle_callback(request: Request, state_obj: OAuthHandlerState) -> Re
     if error_code:
         # Log error code only — error_description may contain PII
         logger.warning("oauth_callback_error: error=%s", error_code)
+        # HTML-escape before inserting into page — defense-in-depth against
+        # reflected XSS even though the CSP already blocks script execution.
+        import html as _html_mod
+        safe_error = _html_mod.escape(error_code)
         # Return 200 with an HTML error page — the browser already landed here
         # from the upstream redirect; a 4xx would confuse some OAuth flows.
-        return _secure_html(_html_error(f"Authorization failed: {error_code}"))
+        return _secure_html(_html_error(f"Authorization failed: {safe_error}"))
 
     raw_state = request.query_params.get("state", "").strip()
     code = request.query_params.get("code", "").strip()
@@ -437,9 +441,10 @@ async def _handle_delete_session(request: Request, state_obj: OAuthHandlerState)
 def _check_management_access(request: Request, state_obj: OAuthHandlerState) -> bool:
     """Return True if the request is authorised to use the management endpoint."""
     if not state_obj.management_bind_all:
-        # Loopback-only mode: check client IP
+        # Loopback-only mode: check client IP.
+        # Include ::ffff:127.0.0.1 for IPv4-mapped IPv6 on dual-stack Linux.
         client_host = getattr(request.client, "host", "") or ""
-        if client_host not in ("127.0.0.1", "::1", "localhost"):
+        if client_host not in ("127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"):
             return False
         return True
 

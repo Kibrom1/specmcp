@@ -538,3 +538,66 @@ def test_version_2_is_accepted(tmp_path):
     cfg_file.write_text(cfg_yaml)
     cfg = Config.load(cfg_file)
     assert cfg.version == "2"
+
+
+# ---------------------------------------------------------------------------
+# redirect_uri HTTPS validator (parity with token_url / authorization_url)
+# ---------------------------------------------------------------------------
+
+_OAUTH2_AUTHCODE_BASE = textwrap.dedent("""\
+    version: "2"
+    spec:
+      source: ./spec.json
+    auth:
+      myOAuth:
+        type: oauth2_authorization_code
+        authorization_url: https://auth.example.com/authorize
+        token_url: https://auth.example.com/token
+        client_id_from: env(CID)
+        client_secret_from: env(CSEC)
+        redirect_uri: {redirect_uri}
+""")
+
+
+def test_redirect_uri_https_is_accepted(tmp_path):
+    """redirect_uri with https:// is valid."""
+    cfg_file = tmp_path / "mcp.config.yaml"
+    cfg_file.write_text(_OAUTH2_AUTHCODE_BASE.format(
+        redirect_uri="https://my-server.example.com/auth/callback"
+    ))
+    cfg = Config.load(cfg_file)
+    assert "myOAuth" in cfg._auth_schemes  # noqa: SLF001
+
+
+def test_redirect_uri_localhost_http_is_accepted(tmp_path):
+    """redirect_uri with http://localhost is valid (local development)."""
+    cfg_file = tmp_path / "mcp.config.yaml"
+    cfg_file.write_text(_OAUTH2_AUTHCODE_BASE.format(
+        redirect_uri="http://localhost:8765/auth/callback"
+    ))
+    cfg = Config.load(cfg_file)
+    assert "myOAuth" in cfg._auth_schemes  # noqa: SLF001
+
+
+def test_redirect_uri_127_http_is_accepted(tmp_path):
+    """redirect_uri with http://127.0.0.1 is valid (local development)."""
+    cfg_file = tmp_path / "mcp.config.yaml"
+    cfg_file.write_text(_OAUTH2_AUTHCODE_BASE.format(
+        redirect_uri="http://127.0.0.1:8765/auth/callback"
+    ))
+    cfg = Config.load(cfg_file)
+    assert "myOAuth" in cfg._auth_schemes  # noqa: SLF001
+
+
+def test_redirect_uri_non_localhost_http_is_rejected(tmp_path):
+    """redirect_uri with http:// on a non-localhost host must be rejected.
+
+    Auth codes in transit over plain HTTP can be intercepted by network
+    observers. Only HTTPS or loopback (localhost/127.0.0.1) HTTP is safe.
+    """
+    cfg_file = tmp_path / "mcp.config.yaml"
+    cfg_file.write_text(_OAUTH2_AUTHCODE_BASE.format(
+        redirect_uri="http://public-server.example.com/auth/callback"
+    ))
+    with pytest.raises(Exception):  # ConfigError wraps pydantic ValidationError
+        Config.load(cfg_file)

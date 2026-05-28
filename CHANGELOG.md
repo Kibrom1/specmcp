@@ -5,6 +5,122 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [1.2.0] — unreleased
+
+### Added
+
+**OAuth 2.0 Authorization Code + PKCE flow** (`oauth2_authorization_code`)
+
+Full interactive login support for APIs that require user-delegated OAuth (GitHub,
+Google, Salesforce, etc.). The server issues a short-lived login URL to the LLM when
+a session has no valid token; the user visits the URL, authenticates, and subsequent
+tool calls proceed automatically with the stored access token.
+
+Key properties:
+- PKCE (RFC 7636, S256) protects every authorization request.
+- Silent token refresh via `refresh_token` grant (RFC 6749 §4.1.4) before expiry.
+  Per-session `asyncio.Lock` prevents concurrent double-refresh races.
+- Tokens are stored either in memory (`--token-store memory`, default) or in an
+  AES-256-GCM encrypted SQLite database (`--token-store sqlite`).
+- Multi-scheme configs create one database file per scheme beside the base path
+  (e.g. `~/.specmcp/tokens_myScheme.db`).
+
+```yaml
+auth:
+  myApi:
+    type: oauth2_authorization_code
+    authorization_url: https://auth.example.com/oauth/authorize
+    token_url: https://auth.example.com/oauth/token
+    redirect_uri: https://yourserver.example.com/auth/callback
+    client_id_from: env(MY_API_CLIENT_ID)
+    client_secret_from: env(MY_API_CLIENT_SECRET)
+    scopes:
+      - read
+      - write
+```
+
+**HTTP transport** (`specmcp serve --transport http`)
+
+Runs the MCP server over HTTP/SSE instead of stdio. Required for OAuth authorization
+code flows (which need an HTTP callback endpoint for the IdP redirect). Defaults to
+port 8765 and `localhost`.
+
+**OAuth management endpoints** (HTTP transport only)
+
+Three Starlette routes mounted under `/auth/`:
+
+| Route | Purpose |
+|---|---|
+| `GET /auth/login?nonce=<token>` | Redirects the user to the IdP authorization page |
+| `GET /auth/callback?code=&state=` | Exchanges the authorization code for tokens |
+| `GET /auth/status?session=<id>` | Polls authentication state (`{"authenticated": true\|false}`) |
+| `DELETE /auth/session/<id>` | Revokes a session's stored tokens |
+
+`DELETE /auth/session/<id>` is a management endpoint: accessible from loopback only
+by default; set `--management-bind all` and `management.management_token_from` to
+expose it externally with Bearer auth.
+
+**`--token-store` flag** (`memory` | `sqlite`)
+
+Controls where OAuth tokens are persisted across tool calls:
+
+- `memory` (default) — tokens are lost on server restart.
+- `sqlite` — tokens are encrypted at rest with AES-256-GCM + HKDF and stored in a
+  SQLite file. Use with `--token-store-path` and `--token-store-key-env`.
+
+**`--management-bind` and `--management-port` flags**
+
+`--management-bind loopback` (default) restricts the `DELETE /auth/session/<id>`
+endpoint to loopback addresses only. `--management-bind all` opens it to all
+interfaces and requires a Bearer token (set via `management.management_token_from`
+in config).
+
+`--management-port` is accepted and stored in config but currently has no routing
+effect — management routes run on the main HTTP transport port. This will be wired
+to a dedicated listener in a future release. A warning is emitted to stderr when
+the flag is explicitly passed.
+
+**`scripts/token_store_rotate.py`** — key rotation utility
+
+Re-encrypts all rows in an SQLite token store with a new AES-256-GCM key. The
+rotation is atomic (writes a temp copy, replaces original only on full success).
+For multi-scheme configs, run the script once per scheme file.
+
+```sh
+python scripts/token_store_rotate.py \
+  --db ~/.specmcp/tokens_myScheme.db \
+  --old-key <64-hex-chars> \
+  --new-key <64-hex-chars>
+```
+
+### Security
+
+- **XSS in OAuth callback error page**: the `error` query parameter returned by the
+  IdP is now HTML-escaped via `html.escape()` before insertion into the error page.
+  A `Content-Security-Policy: default-src 'none'` header is also set as defence-in-depth.
+- **IPv4-mapped loopback**: the management endpoint loopback allowlist now includes
+  `::ffff:127.0.0.1` (the IPv4-mapped loopback address on dual-stack Linux hosts)
+  alongside `127.0.0.1`, `::1`, and `localhost`.
+- **`redirect_uri` HTTPS enforcement**: `OAuth2AuthorizationCodeConfig` now applies
+  the same HTTPS validator as `authorization_url` and `token_url`. `http://` URIs are
+  rejected unless the host is `localhost` or `127.0.0.1`.
+- **`AuthRequiredError` with `login_url=None`**: when nonce issuance fails, the MCP
+  error content previously rendered the literal string `"None"`. It now returns a
+  coherent fallback message directing the user to check server logs.
+- **`SPECMCP_TOKEN_KEY` entropy warning**: keys shorter than 16 bytes emit an advisory
+  to stderr at startup. AES-256-GCM + HKDF derivation still functions with short keys
+  but with reduced security margin.
+
+### Changed
+
+- `TokenStore` ABC gains no-op `open()` and `close()` defaults so all store types
+  can be lifecycle-managed uniformly. `SqliteTokenStore` overrides both to manage
+  the `aiosqlite` connection.
+- `CLAUDE.md` updated with OAuth flow walkthrough, security invariants section, and
+  serve CLI flags reference table.
+
+---
+
 ## [1.1.0] — unreleased
 
 ### Added

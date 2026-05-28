@@ -72,11 +72,13 @@ specmcp serve --spec api.yaml
 | `--transport` / `-t` | `stdio` | `stdio` or `http` |
 | `--watch` / `-w` | `False` | Hot-reload spec/config on change |
 | `--verbose` / `-v` | `False` | DEBUG-level logging |
-| `--management-port` | *(from config, default 8766)* | Override management endpoint port |
+| `--management-port` | *(from config, default 8766)* | Override management endpoint port (**reserved** — no routing effect yet; emits a warning when passed; see note below) |
 | `--management-bind` | *(from config, default `loopback`)* | `loopback` or `all` |
 | `--token-store` | `memory` | `memory` (lost on restart) or `sqlite` (encrypted at rest) |
 | `--token-store-path` | `~/.specmcp/tokens.db` | SQLite database path (sqlite only) |
 | `--token-store-key-env` | `SPECMCP_TOKEN_KEY` | Env var name holding encryption key (sqlite only) |
+
+**`--management-port` note**: The field is wired into `ManagementConfig` and the flag is accepted, but management routes currently run on the main HTTP transport port — the `port` value has no routing effect. A warning is emitted to stderr when the flag is explicitly passed. This will be fixed in a future release.
 
 ---
 
@@ -178,6 +180,26 @@ headers, params = await injector.inject(tool, session=session)
 ```
 
 **Gotcha — `_check_management_access` in `TestClient`**: Starlette `TestClient` sets the client host to `"testclient"`, which fails the loopback check. Patch `specmcp.runtime.oauth_handler._check_management_access` to `return True` in tests that hit management endpoints.
+
+---
+
+## Security invariants
+
+These properties are load-bearing — do not weaken them without a design-doc update.
+
+**XSS in OAuth callback error page** (`runtime/oauth_handler.py`): The `error` query parameter from the IdP is HTML-escaped via `html.escape()` before insertion into the error page. The page also carries `Content-Security-Policy: default-src 'none'` as defence-in-depth, but the escape is the primary control. Never interpolate raw query-string values into HTML.
+
+**Loopback enforcement for management endpoints** (`runtime/oauth_handler.py`): `_check_management_access` allows only `127.0.0.1`, `::1`, `localhost`, and `::ffff:127.0.0.1` (IPv4-mapped loopback on dual-stack Linux). If `management_bind_all` is set, the check is skipped and `management_token` Bearer auth is required instead.
+
+**`redirect_uri` must be HTTPS** (`config.py`): `OAuth2AuthorizationCodeConfig.validate_redirect_uri` applies the same `_validate_token_url` guard as `authorization_url` and `token_url`. `http://` is rejected unless the host is `localhost` or `127.0.0.1` (dev exemption).
+
+**`AuthRequiredError` with `login_url=None`** (`errors.py`): When nonce issuance fails, `login_url` is `None`. `mcp_error_content()` special-cases this before template substitution to avoid rendering the literal string `"None"` in the MCP response. Do not remove this pre-check.
+
+**`SPECMCP_TOKEN_KEY` entropy warning** (`cli/serve.py`): Keys shorter than 16 bytes emit a stderr advisory at startup. This is a warning, not a fatal error, to avoid breaking existing deployments with short keys. The AES-256-GCM + HKDF derivation layer will still function, but short keys offer reduced security margin.
+
+### Key rotation (SQLite token store)
+
+`scripts/token_store_rotate.py` re-encrypts all rows in a token store with a new AES-256-GCM key. For multi-scheme configs, `_build_oauth_state` creates one file per scheme beside the base path (e.g. `tokens_myScheme.db`). Run the rotation script once per file — see the script's module docstring for the full procedure.
 
 ---
 
