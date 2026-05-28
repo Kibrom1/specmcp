@@ -116,6 +116,17 @@ python scripts/token_store_rotate.py \
 - `TokenStore` ABC gains no-op `open()` and `close()` defaults so all store types
   can be lifecycle-managed uniformly. `SqliteTokenStore` overrides both to manage
   the `aiosqlite` connection.
+- `CachedToken.access_token` is now stored as `SensitiveStr` (was plain `str`).
+  Accidental `repr()` / `str()` calls on `CachedToken` no longer expose the raw
+  token value in logs. `get_or_refresh()` still returns a plain `str` via
+  `reveal()` so the public API is unchanged.
+- Dispatcher retries on 401 for `oauth2_client_credentials` schemes: when the
+  upstream returns HTTP 401, any cached access token is invalidated and the
+  request is retried once with a freshly-fetched token. A second 401 raises
+  `AuthError` instead of `UpstreamClientError` so the LLM receives a clear
+  "credentials rejected" message rather than a raw upstream error. Bearer,
+  API-key, and authorization-code schemes are not retried (a 401 there means
+  the credential is wrong, not stale).
 - `CLAUDE.md` updated with OAuth flow walkthrough, security invariants section, and
   serve CLI flags reference table.
 

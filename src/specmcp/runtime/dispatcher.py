@@ -36,7 +36,7 @@ from specmcp.auth.injector import AuthInjector
 from specmcp.config import DispatchConfig, OperationOverride
 from specmcp.core.expose import ToolDefinition
 from specmcp.core.model import ArgumentBinding, Operation
-from specmcp.errors import DispatchError, ResponseTooLargeError
+from specmcp.errors import AuthError, DispatchError, ResponseTooLargeError, UpstreamClientError
 from specmcp.runtime.http_client import HttpClient, HttpResponse
 from specmcp.runtime.session import SessionContext
 
@@ -163,6 +163,9 @@ async def dispatch(
                 req_headers.setdefault("Content-Type", content_type)
 
     # 7. Auth injection (async — OAuth schemes may fetch a token here)
+    # Save pre-auth copies so we can re-inject from a clean slate on 401 retry.
+    _req_headers_no_auth = dict(req_headers)
+    _query_params_no_auth = dict(query_params)
     req_headers, query_params = await auth_injector.inject(
         op.auth,
         headers=req_headers,
@@ -201,17 +204,52 @@ async def dispatch(
             text += "\n\n[Response truncated]"
         return [{"type": "text", "text": text}]
 
-    response = await http_client.request(
-        method=op.method,
-        url=url,
-        headers=req_headers,
-        params=query_params,
-        json_body=json_body,
-        form_body=form_body,
-        timeout_seconds=timeout,
-        retry_config=retry,
-        request_id=request_id,
-    )
+    try:
+        response = await http_client.request(
+            method=op.method,
+            url=url,
+            headers=req_headers,
+            params=query_params,
+            json_body=json_body,
+            form_body=form_body,
+            timeout_seconds=timeout,
+            retry_config=retry,
+            request_id=request_id,
+        )
+    except UpstreamClientError as exc:
+        if exc.status_code != 401:
+            raise
+        # 401: invalidate any cached OAuth tokens and retry once.
+        # invalidate_cached_tokens() returns False when the scheme has no
+        # TokenCache (e.g. bearer or auth-code), in which case we propagate
+        # the original error rather than masking it with a pointless retry.
+        if not auth_injector.invalidate_cached_tokens(op.auth):
+            raise
+        req_headers, query_params = await auth_injector.inject(
+            op.auth,
+            headers=_req_headers_no_auth,
+            params=_query_params_no_auth,
+            session=session,
+        )
+        try:
+            response = await http_client.request(
+                method=op.method,
+                url=url,
+                headers=req_headers,
+                params=query_params,
+                json_body=json_body,
+                form_body=form_body,
+                timeout_seconds=timeout,
+                retry_config=retry,
+                request_id=request_id,
+            )
+        except UpstreamClientError as retry_exc:
+            if retry_exc.status_code == 401:
+                raise AuthError(
+                    "Upstream rejected credentials after OAuth token refresh",
+                    request_id=request_id,
+                ) from retry_exc
+            raise
 
     # 10. Format result as MCP content blocks
     return _format_result(response)

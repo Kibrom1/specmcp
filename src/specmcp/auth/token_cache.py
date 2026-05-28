@@ -7,9 +7,10 @@ tool calls race on an expired token — only one coroutine fetches a new token
 while the others wait and then reuse it.
 
 Design constraints:
-  - The access_token is a plain str, not SensitiveStr. It lives only in
-    CachedToken inside TokenCache inside AuthInjector — never in ResolvedScheme
-    or any field that could be serialised or logged. All TokenRefreshError
+  - The access_token is stored as SensitiveStr so that accidental repr() /
+    str() calls on CachedToken do not leak the raw token into logs. The raw
+    string is only exposed via SensitiveStr.reveal(), which is called inside
+    get_or_refresh() just before returning to the caller. All TokenRefreshError
     messages must omit the token value (only token_url and status_code are safe).
   - No persistence to disk in v1.1 — in-memory only.
 """
@@ -21,13 +22,15 @@ import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
+from specmcp.config import SensitiveStr
+
 
 @dataclass
 class CachedToken:
     """A fetched access token with its expiry timestamp."""
 
-    access_token: str    # never log
-    expires_at: float    # monotonic clock timestamp
+    access_token: SensitiveStr    # wrapped — call .reveal() to use
+    expires_at: float             # monotonic clock timestamp
 
     def is_expired(self, buffer_seconds: float = 60.0) -> bool:
         """Return True if the token will expire within *buffer_seconds*.
@@ -67,7 +70,8 @@ class TokenCache:
                 be invoked concurrently for the same scheme.
 
         Returns:
-            The raw access token string. Caller is responsible for not logging it.
+            The raw access token string (revealed from SensitiveStr).
+            Caller is responsible for not logging it.
 
         Raises:
             TokenRefreshError: if *refresh_fn* raises (propagated unchanged).
@@ -75,7 +79,7 @@ class TokenCache:
         async with self._lock:
             if self._token is None or self._token.is_expired():
                 self._token = await refresh_fn()
-            return self._token.access_token
+            return self._token.access_token.reveal()
 
     def invalidate(self) -> None:
         """Force the next call to get_or_refresh() to fetch a new token.

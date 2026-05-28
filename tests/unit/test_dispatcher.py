@@ -606,3 +606,189 @@ async def test_dispatch_session_none_uses_static_token():
     )
 
     assert captured_headers.get("Authorization") == "Bearer env-token"
+
+
+# ---------------------------------------------------------------------------
+# 401 retry — OAuth client_credentials token invalidation
+# ---------------------------------------------------------------------------
+
+
+def _make_oauth_tool() -> tuple[ToolDefinition, AuthInjector]:
+    """Return a tool and injector wired with an oauth2_client_credentials scheme."""
+    import os
+    import textwrap
+    from specmcp.config import Config
+
+    op = _make_op(
+        method="GET",
+        path="/items",
+        auth=[[AuthRequirement(scheme_name="myOAuth")]],
+    )
+    arg_map = ArgumentMap(bindings={})
+    tool = _make_tool(op, arg_map)
+
+    yaml_cfg = textwrap.dedent("""
+        version: "1"
+        spec:
+          source: https://example.com/openapi.json
+        auth:
+          myOAuth:
+            type: oauth2_client_credentials
+            token_url: https://auth.example.com/token
+            client_id_from: env(OAUTH_CLIENT_ID)
+            client_secret_from: env(OAUTH_CLIENT_SECRET)
+    """)
+    with __import__("unittest.mock", fromlist=["patch"]).patch.dict(
+        os.environ,
+        {"OAUTH_CLIENT_ID": "cid", "OAUTH_CLIENT_SECRET": "csec"},
+    ):
+        cfg = Config.model_validate(__import__("yaml").safe_load(yaml_cfg))
+        injector = AuthInjector.build(cfg)
+
+    return tool, injector
+
+
+@pytest.mark.asyncio
+async def test_dispatch_retries_on_401_with_oauth_token():
+    """A 401 from upstream invalidates the cached token and retries once."""
+    import os
+    from specmcp.errors import UpstreamClientError
+
+    tool, injector = _make_oauth_tool()
+
+    # Pre-seed a token so the first inject() doesn't need to call the endpoint
+    from specmcp.auth.token_cache import CachedToken
+    from specmcp.config import SensitiveStr
+    import time
+
+    injector._token_caches["myOAuth"]._token = CachedToken(
+        access_token=SensitiveStr("stale-token"),
+        expires_at=time.monotonic() + 3600,
+    )
+
+    client = MagicMock()
+    call_count = 0
+
+    import respx, httpx
+
+    async def _side_effect(**kwargs: Any) -> HttpResponse:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise UpstreamClientError(
+                "Unauthorized", status_code=401, body="token expired"
+            )
+        # Second call: inject will have fetched a fresh token via the mock endpoint
+        return _fake_http_response('{"ok": true}')
+
+    client.request = AsyncMock(side_effect=_side_effect)
+
+    with respx.mock:
+        respx.post("https://auth.example.com/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={"access_token": "fresh-token", "expires_in": 3600},
+            )
+        )
+        with __import__("unittest.mock", fromlist=["patch"]).patch.dict(
+            os.environ,
+            {"OAUTH_CLIENT_ID": "cid", "OAUTH_CLIENT_SECRET": "csec"},
+        ):
+            result = await dispatch(
+                tool=tool,
+                llm_args={},
+                http_client=client,
+                auth_injector=injector,
+                dispatch_config=_dispatch_cfg(),
+            )
+
+    assert call_count == 2
+    assert result == [{"type": "text", "text": '{\n  "ok": true\n}'}]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_no_retry_on_401_without_oauth():
+    """A 401 on a tool with no cached OAuth token is propagated unchanged."""
+    from specmcp.config import BearerAuthConfig, SensitiveStr
+    from specmcp.auth.injector import ResolvedScheme
+    from specmcp.errors import UpstreamClientError
+
+    op = _make_op(
+        method="GET",
+        path="/items",
+        auth=[[AuthRequirement(scheme_name="myBearer")]],
+    )
+    tool = _make_tool(op, ArgumentMap(bindings={}))
+
+    injector = AuthInjector(
+        _schemes={
+            "myBearer": ResolvedScheme(
+                scheme_name="myBearer",
+                config=BearerAuthConfig(type="bearer", value_from="env(X)"),
+                credential=SensitiveStr("tok"),
+            )
+        },
+        _token_caches={},
+    )
+
+    client = MagicMock()
+    client.request = AsyncMock(
+        side_effect=UpstreamClientError("Unauthorized", status_code=401)
+    )
+
+    with pytest.raises(UpstreamClientError) as exc_info:
+        await dispatch(
+            tool=tool,
+            llm_args={},
+            http_client=client,
+            auth_injector=injector,
+            dispatch_config=_dispatch_cfg(),
+        )
+
+    assert exc_info.value.status_code == 401
+    assert client.request.call_count == 1  # no retry
+
+
+@pytest.mark.asyncio
+async def test_dispatch_raises_auth_error_if_retry_also_401():
+    """If both attempts return 401, raises AuthError (not UpstreamClientError)."""
+    import os
+    import time
+    from specmcp.auth.token_cache import CachedToken
+    from specmcp.config import SensitiveStr
+    from specmcp.errors import AuthError, UpstreamClientError
+
+    tool, injector = _make_oauth_tool()
+    injector._token_caches["myOAuth"]._token = CachedToken(
+        access_token=SensitiveStr("stale-token"),
+        expires_at=time.monotonic() + 3600,
+    )
+
+    client = MagicMock()
+    client.request = AsyncMock(
+        side_effect=UpstreamClientError("Unauthorized", status_code=401)
+    )
+
+    import respx, httpx
+
+    with respx.mock:
+        respx.post("https://auth.example.com/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={"access_token": "new-token", "expires_in": 3600},
+            )
+        )
+        with __import__("unittest.mock", fromlist=["patch"]).patch.dict(
+            os.environ,
+            {"OAUTH_CLIENT_ID": "cid", "OAUTH_CLIENT_SECRET": "csec"},
+        ):
+            with pytest.raises(AuthError, match="after OAuth token refresh"):
+                await dispatch(
+                    tool=tool,
+                    llm_args={},
+                    http_client=client,
+                    auth_injector=injector,
+                    dispatch_config=_dispatch_cfg(),
+                )
+
+    assert client.request.call_count == 2  # original + one retry

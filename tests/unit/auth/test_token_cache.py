@@ -18,6 +18,7 @@ import anyio
 import pytest
 
 from specmcp.auth.token_cache import CachedToken, TokenCache
+from specmcp.config import SensitiveStr
 
 
 # ---------------------------------------------------------------------------
@@ -27,7 +28,7 @@ from specmcp.auth.token_cache import CachedToken, TokenCache
 
 def test_fresh_token_not_expired() -> None:
     token = CachedToken(
-        access_token="tok",
+        access_token=SensitiveStr("tok"),
         expires_at=time.monotonic() + 3600,
     )
     assert not token.is_expired()
@@ -35,7 +36,7 @@ def test_fresh_token_not_expired() -> None:
 
 def test_expired_token() -> None:
     token = CachedToken(
-        access_token="tok",
+        access_token=SensitiveStr("tok"),
         expires_at=time.monotonic() - 1,  # already past
     )
     assert token.is_expired()
@@ -44,7 +45,7 @@ def test_expired_token() -> None:
 def test_token_within_buffer_is_expired() -> None:
     # expires in 30 seconds, buffer is 60 — should be considered expired
     token = CachedToken(
-        access_token="tok",
+        access_token=SensitiveStr("tok"),
         expires_at=time.monotonic() + 30,
     )
     assert token.is_expired(buffer_seconds=60.0)
@@ -52,10 +53,20 @@ def test_token_within_buffer_is_expired() -> None:
 
 def test_token_outside_buffer_not_expired() -> None:
     token = CachedToken(
-        access_token="tok",
+        access_token=SensitiveStr("tok"),
         expires_at=time.monotonic() + 120,
     )
     assert not token.is_expired(buffer_seconds=60.0)
+
+
+def test_cached_token_repr_hides_value() -> None:
+    """SensitiveStr must not expose the raw token in repr/str of CachedToken."""
+    token = CachedToken(
+        access_token=SensitiveStr("super-secret-token"),
+        expires_at=time.monotonic() + 3600,
+    )
+    assert "super-secret-token" not in repr(token)
+    assert "super-secret-token" not in str(token)
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +75,7 @@ def test_token_outside_buffer_not_expired() -> None:
 
 
 def _make_token(value: str, ttl: float = 3600.0) -> CachedToken:
-    return CachedToken(access_token=value, expires_at=time.monotonic() + ttl)
+    return CachedToken(access_token=SensitiveStr(value), expires_at=time.monotonic() + ttl)
 
 
 @pytest.mark.asyncio
@@ -101,7 +112,7 @@ async def test_second_call_hits_cache() -> None:
 @pytest.mark.asyncio
 async def test_expired_token_triggers_refresh() -> None:
     cache = TokenCache()
-    cache._token = CachedToken(access_token="old", expires_at=time.monotonic() - 1)
+    cache._token = CachedToken(access_token=SensitiveStr("old"), expires_at=time.monotonic() - 1)
     calls = 0
 
     async def refresh() -> CachedToken:

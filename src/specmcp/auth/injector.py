@@ -408,6 +408,34 @@ class AuthInjector:
         """Return True if *name* is configured."""
         return name in self._schemes or name in self._auth_code_handlers
 
+    def invalidate_cached_tokens(
+        self, auth_requirements: list[list[AuthRequirement]]
+    ) -> bool:
+        """Invalidate any cached OAuth access tokens referenced by *auth_requirements*.
+
+        Called by the dispatcher after receiving a 401 from the upstream so
+        that the next ``inject()`` call fetches a fresh token.
+
+        Only ``oauth2_client_credentials`` schemes have a ``TokenCache`` and
+        are invalidated here.  ``oauth2_authorization_code`` tokens are stored
+        in a ``TokenStore`` and are not touched — a 401 on an auth-code scheme
+        typically means the token was revoked server-side; the user must
+        re-authenticate via the login URL.
+
+        Returns:
+            ``True`` if at least one cache was invalidated (a retry may
+            succeed).  ``False`` if no cached token was found (the 401 is
+            unrelated to token caching; re-raising is appropriate).
+        """
+        invalidated = False
+        for group in auth_requirements:
+            for req in group:
+                cache = self._token_caches.get(req.scheme_name)
+                if cache is not None:
+                    cache.invalidate()
+                    invalidated = True
+        return invalidated
+
 
 # ---------------------------------------------------------------------------
 # OAuth client_credentials token fetch (module-level to keep handler thin)
@@ -471,6 +499,6 @@ async def _fetch_client_credentials_token(
 
     expires_in = float(body.get("expires_in", 3600))
     return CachedToken(
-        access_token=body["access_token"],
+        access_token=SensitiveStr(body["access_token"]),
         expires_at=time.monotonic() + expires_in,
     )
