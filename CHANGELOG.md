@@ -5,6 +5,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [1.3.0] — unreleased
+
+### Added
+
+**Dedicated management listener** (`--management-port`)
+
+The `DELETE /auth/session/<id>` management endpoint now runs on its own dedicated
+port (default 8766) instead of sharing the main HTTP transport port. This separates
+public-facing OAuth routes (`/auth/login`, `/auth/callback`, `/auth/status`) from the
+privileged session-revocation endpoint.
+
+Two Starlette apps are now started in an inner anyio task group when OAuth
+authorization-code schemes are configured:
+
+- **Main app** (default port 8765): `/sse`, `/messages`, `/auth/login`,
+  `/auth/callback`, `/auth/status`.
+- **Management app** (default port 8766): `DELETE /auth/session/<id>` only,
+  bound to `127.0.0.1` (loopback) by default or `0.0.0.0` when
+  `--management-bind all` is set.
+
+The `--management-port` flag now has full routing effect (the "no routing effect"
+warning previously emitted at startup has been removed).
+
+### Changed
+
+- `build_oauth_routes()` in `runtime/oauth_handler.py` is preserved for backward
+  compatibility. Two new helpers, `build_public_oauth_routes()` and
+  `build_management_routes()`, are used internally by `_run_http` to populate the
+  respective apps.
+- `CLAUDE.md` updated to remove the "reserved" status for `--management-port` and
+  to describe the two-listener architecture.
+
+---
+
 ## [1.2.0] — unreleased
 
 ### Added

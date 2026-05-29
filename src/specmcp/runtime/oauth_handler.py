@@ -542,20 +542,34 @@ def _check_scope_downgrade(
 
 
 def build_oauth_routes(state: OAuthHandlerState) -> list[Route]:
-    """Return a list of Starlette Routes for the OAuth endpoints.
+    """Return all OAuth routes (public + management) as a single list.
 
-    The *state* is captured in closures, so no ``app.state`` attachment is needed.
-    Mount these alongside the MCP SSE routes in the Starlette app::
+    Convenience wrapper that combines ``build_public_oauth_routes`` and
+    ``build_management_routes``.  Use this when you want to mount everything
+    on one Starlette app (e.g. in tests or when running without a dedicated
+    management listener).
 
-        from starlette.applications import Starlette
-        from starlette.routing import Route
-        from specmcp.runtime.oauth_handler import build_oauth_routes
+    For production use with a dedicated management port, mount the two
+    route lists on separate Starlette apps::
 
-        app = Starlette(routes=[
+        main_app = Starlette(routes=[
             Route("/sse", mcp_sse_handler),
             Route("/messages", mcp_message_handler, methods=["POST"]),
-            *build_oauth_routes(oauth_state),
+            *build_public_oauth_routes(oauth_state),
         ])
+        mgmt_app = Starlette(routes=build_management_routes(oauth_state))
+    """
+    return build_public_oauth_routes(state) + build_management_routes(state)
+
+
+def build_public_oauth_routes(state: OAuthHandlerState) -> list[Route]:
+    """Return Starlette Routes for the user-facing OAuth endpoints.
+
+    These are safe to expose on the main HTTP transport port::
+
+      GET /auth/login?nonce=<token>    — redirect to IdP
+      GET /auth/callback?code=&state=  — exchange code, show success page
+      GET /auth/status?session=<id>    — poll authentication state
     """
     async def login(request: Request) -> Response:
         return await _handle_login(request, state)
@@ -566,13 +580,25 @@ def build_oauth_routes(state: OAuthHandlerState) -> list[Route]:
     async def status(request: Request) -> Response:
         return await _handle_status(request, state)
 
-    async def delete_session(request: Request) -> Response:
-        return await _handle_delete_session(request, state)
-
     return [
         Route("/auth/login", endpoint=login, methods=["GET"]),
         Route("/auth/callback", endpoint=callback, methods=["GET"]),
         Route("/auth/status", endpoint=status, methods=["GET"]),
+    ]
+
+
+def build_management_routes(state: OAuthHandlerState) -> list[Route]:
+    """Return Starlette Routes for the management-only OAuth endpoints.
+
+    Should be mounted on a dedicated management listener bound to loopback
+    (or protected by Bearer auth when exposed externally)::
+
+      DELETE /auth/session/<session_id>  — revoke stored tokens
+    """
+    async def delete_session(request: Request) -> Response:
+        return await _handle_delete_session(request, state)
+
+    return [
         Route("/auth/session/{session_id}", endpoint=delete_session, methods=["DELETE"]),
     ]
 

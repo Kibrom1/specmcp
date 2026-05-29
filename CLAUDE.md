@@ -72,13 +72,15 @@ specmcp serve --spec api.yaml
 | `--transport` / `-t` | `stdio` | `stdio` or `http` |
 | `--watch` / `-w` | `False` | Hot-reload spec/config on change |
 | `--verbose` / `-v` | `False` | DEBUG-level logging |
-| `--management-port` | *(from config, default 8766)* | Override management endpoint port (**reserved** — no routing effect yet; emits a warning when passed; see note below) |
+| `--management-port` | *(from config, default 8766)* | Port for the dedicated management listener (`DELETE /auth/session/<id>`), separate from the main HTTP transport port |
 | `--management-bind` | *(from config, default `loopback`)* | `loopback` or `all` |
 | `--token-store` | `memory` | `memory` (lost on restart) or `sqlite` (encrypted at rest) |
 | `--token-store-path` | `~/.specmcp/tokens.db` | SQLite database path (sqlite only) |
 | `--token-store-key-env` | `SPECMCP_TOKEN_KEY` | Env var name holding encryption key (sqlite only) |
 
-**`--management-port` note**: The field is wired into `ManagementConfig` and the flag is accepted, but management routes currently run on the main HTTP transport port — the `port` value has no routing effect. A warning is emitted to stderr when the flag is explicitly passed. This will be fixed in a future release.
+**Two-listener architecture**: when `--transport http` is used with OAuth authorization-code schemes, `_run_http` starts two Starlette apps in an inner anyio task group:
+- **Main app** (default port 8765): `/sse`, `/messages`, `/auth/login`, `/auth/callback`, `/auth/status`.
+- **Management app** (default port 8766): `DELETE /auth/session/<id>` only, bound to `127.0.0.1` by default (`0.0.0.0` when `--management-bind all`).
 
 ---
 

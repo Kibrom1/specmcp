@@ -496,9 +496,10 @@ def test_build_oauth_state_registers_auth_code_handler_with_injector():
 
 
 @pytest.mark.asyncio
-async def test_run_http_mounts_oauth_routes_when_auth_code_configured():
+async def test_run_http_mounts_public_oauth_routes_on_main_app():
     """When an oauth2_authorization_code scheme is configured, _run_http must
-    mount /auth/login, /auth/callback, /auth/status, and /auth/session/{id}."""
+    mount /auth/login, /auth/callback, and /auth/status on the MAIN app and
+    /auth/session/{id} on the dedicated MANAGEMENT app (second uvicorn.Config call)."""
     import textwrap, tempfile, os
     from specmcp.cli.serve import _run_http
     from specmcp.config import Config, DispatchConfig
@@ -533,10 +534,11 @@ async def test_run_http_mounts_oauth_routes_when_auth_code_configured():
             injector = AuthInjector.build(cfg)
             dispatch_cfg = DispatchConfig()
 
+            # captured_app[0] = main app, captured_app[1] = management app
             captured_app = []
 
             def _fake_Config(app, host, port, log_level="warning"):
-                captured_app.append(app)
+                captured_app.append((app, host, port))
                 return MagicMock()
 
             with patch("uvicorn.Config", side_effect=_fake_Config), \
@@ -545,14 +547,91 @@ async def test_run_http_mounts_oauth_routes_when_auth_code_configured():
                 async with HttpClient(dispatch_cfg) as http_client:
                     await _run_http(registry_ref, http_client, injector, dispatch_cfg, cfg)
 
-        assert len(captured_app) == 1
-        route_paths = {route.path for route in captured_app[0].routes}
+        # Two uvicorn.Config calls: main app + management app
+        assert len(captured_app) == 2, \
+            f"Expected 2 uvicorn.Config calls (main + mgmt), got {len(captured_app)}"
 
-        assert "/auth/login" in route_paths, f"Missing /auth/login — got: {route_paths}"
-        assert "/auth/callback" in route_paths, f"Missing /auth/callback — got: {route_paths}"
-        assert "/auth/status" in route_paths, f"Missing /auth/status — got: {route_paths}"
-        assert "/auth/session/{session_id}" in route_paths, \
-            f"Missing /auth/session/{{session_id}} — got: {route_paths}"
+        main_app, main_host, main_port = captured_app[0]
+        mgmt_app, mgmt_host, mgmt_port = captured_app[1]
+
+        main_paths = {route.path for route in main_app.routes}
+        mgmt_paths = {route.path for route in mgmt_app.routes}
+
+        # Public routes are on the main app
+        assert "/auth/login" in main_paths, f"Missing /auth/login on main — got: {main_paths}"
+        assert "/auth/callback" in main_paths, f"Missing /auth/callback on main — got: {main_paths}"
+        assert "/auth/status" in main_paths, f"Missing /auth/status on main — got: {main_paths}"
+        # Management route must NOT be on the main app
+        assert "/auth/session/{session_id}" not in main_paths, \
+            f"/auth/session/{{session_id}} must be on mgmt app, not main — got: {main_paths}"
+
+        # Management route is on the management app
+        assert "/auth/session/{session_id}" in mgmt_paths, \
+            f"Missing /auth/session/{{session_id}} on mgmt app — got: {mgmt_paths}"
+
+        # Management app is bound to loopback (default config has no management section)
+        assert mgmt_host == "127.0.0.1", f"Expected mgmt host 127.0.0.1, got {mgmt_host}"
+        # Management port defaults to 8766
+        assert mgmt_port == 8766, f"Expected mgmt port 8766, got {mgmt_port}"
+    finally:
+        os.unlink(cfg_path)
+
+
+@pytest.mark.asyncio
+async def test_run_http_management_port_respected():
+    """Management app must use cfg.management.port when set."""
+    import textwrap, tempfile, os
+    from specmcp.cli.serve import _run_http
+    from specmcp.config import Config, DispatchConfig
+    from specmcp.runtime.registry_ref import RegistryRef
+
+    cfg_yaml = textwrap.dedent("""\
+        version: "2"
+        spec:
+          source: ./spec.json
+        management:
+          port: 9090
+        auth:
+          myOAuth:
+            type: oauth2_authorization_code
+            authorization_url: https://auth.example.com/authorize
+            token_url: https://auth.example.com/token
+            client_id_from: env(TEST_CLIENT_ID)
+            client_secret_from: env(TEST_CLIENT_SECRET)
+            redirect_uri: http://localhost:8765/auth/callback
+    """)
+    with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+        f.write(cfg_yaml)
+        cfg_path = f.name
+
+    try:
+        with patch.dict(os.environ, {
+            "TEST_CLIENT_ID": "cid",
+            "TEST_CLIENT_SECRET": "csec",
+        }):
+            cfg = Config.load(Path(cfg_path))
+
+            registry = _make_registry_with_one_tool()
+            registry_ref = RegistryRef(registry)
+            injector = AuthInjector.build(cfg)
+            dispatch_cfg = DispatchConfig()
+
+            captured_configs: list = []
+
+            def _fake_Config(app, host, port, log_level="warning"):
+                captured_configs.append((app, host, port))
+                return MagicMock()
+
+            with patch("uvicorn.Config", side_effect=_fake_Config), \
+                 patch("uvicorn.Server", return_value=AsyncMock(serve=AsyncMock())):
+                from specmcp.runtime.http_client import HttpClient
+                async with HttpClient(dispatch_cfg) as http_client:
+                    await _run_http(registry_ref, http_client, injector, dispatch_cfg, cfg)
+
+        assert len(captured_configs) == 2
+        _, mgmt_host, mgmt_port = captured_configs[1]
+        assert mgmt_port == 9090, f"Expected mgmt port 9090, got {mgmt_port}"
+        assert mgmt_host == "127.0.0.1"
     finally:
         os.unlink(cfg_path)
 
@@ -657,18 +736,6 @@ def test_management_port_flag_overrides_cfg():
     finally:
         os.unlink(cfg_path)
 
-
-def test_management_port_flag_emits_no_routing_effect_warning():
-    """--management-port must warn that the port has no routing effect yet."""
-    with patch("specmcp.cli.serve.anyio.run"):
-        r = runner.invoke(app, [
-            "serve",
-            "--spec", str(PETSTORE_SPEC),
-            "--management-port", "9000",
-        ])
-    assert r.exit_code == 0
-    output = r.output.lower()
-    assert "no routing effect" in output or "future" in output
 
 
 def test_management_bind_flag_overrides_cfg():
@@ -1053,7 +1120,10 @@ async def test_run_http_closes_stores_when_uvicorn_raises():
              patch("uvicorn.Config", return_value=MagicMock()), \
              patch("uvicorn.Server", return_value=AsyncMock(serve=AsyncMock(side_effect=RuntimeError("boom")))):
             from specmcp.runtime.http_client import HttpClient
-            with pytest.raises(RuntimeError, match="boom"):
+            # With OAuth state present, two uvicorn servers run concurrently in a task
+            # group. Both raise RuntimeError("boom"), which anyio may deliver as an
+            # ExceptionGroup on Python 3.11+. We care only that the finally block runs.
+            with pytest.raises(Exception):
                 async with HttpClient(dispatch_cfg) as http_client:
                     await _run_http(registry_ref, http_client, injector, dispatch_cfg, cfg)
 

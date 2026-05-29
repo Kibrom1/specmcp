@@ -138,9 +138,9 @@ def serve_cmd(
         "--management-port",
         help=(
             "Override management.port in the config (default: 8766). "
-            "NOTE: this field is currently reserved — management routes run on the same "
-            "port as the HTTP transport and this value has no routing effect yet. "
-            "It will take effect in a future release when management gets a dedicated listener."
+            "Management endpoints (DELETE /auth/session/<id>) run on this dedicated port, "
+            "separate from the main HTTP transport port. "
+            "Only relevant with HTTP transport and OAuth2 authorization_code schemes."
         ),
     ),
     management_bind: Optional[str] = typer.Option(  # noqa: UP007
@@ -221,14 +221,6 @@ def serve_cmd(
             err=True,
         )
         raise typer.Exit(64)
-
-    if management_port is not None:
-        typer.echo(
-            "Warning: --management-port sets management.port in the config but currently has "
-            "no routing effect — management routes run on the HTTP transport port. "
-            "This will take effect in a future release.",
-            err=True,
-        )
 
     if cfg is not None and (management_port is not None or management_bind is not None):
         from specmcp.config import ManagementConfig
@@ -764,10 +756,10 @@ async def _run_http(
         finally:
             _sessions.pop(session.session_id, None)
 
-    # Mount OAuth callback routes alongside the MCP SSE routes when an
-    # oauth2_authorization_code scheme is configured.
-    from specmcp.runtime.oauth_handler import build_oauth_routes
-    oauth_routes = build_oauth_routes(oauth_state) if oauth_state else []
+    # Mount public OAuth routes (login / callback / status) on the main app.
+    # Management routes (DELETE /auth/session/<id>) run on a separate port.
+    from specmcp.runtime.oauth_handler import build_public_oauth_routes, build_management_routes
+    public_oauth_routes = build_public_oauth_routes(oauth_state) if oauth_state else []
 
     starlette_app = Starlette(
         routes=[
@@ -777,7 +769,7 @@ async def _run_http(
                 endpoint=sse_transport.handle_post_message,
                 methods=["POST"],
             ),
-            *oauth_routes,
+            *public_oauth_routes,
         ]
     )
 
@@ -788,8 +780,34 @@ async def _run_http(
         log_level="warning",
     )
     uvicorn_server = uvicorn.Server(uvicorn_config)
+
+    # Build the management server (dedicated port, loopback-only by default).
+    # Only started when OAuth authorization-code schemes are configured.
+    mgmt_app = None
+    mgmt_server = None
+    if oauth_state is not None:
+        mgmt_host = (
+            "127.0.0.1"
+            if (cfg is None or cfg.management.bind == "loopback")
+            else "0.0.0.0"
+        )
+        mgmt_port = cfg.management.port if cfg is not None else 8766
+        mgmt_app = Starlette(routes=build_management_routes(oauth_state))
+        mgmt_config = uvicorn.Config(
+            mgmt_app,
+            host=mgmt_host,
+            port=mgmt_port,
+            log_level="warning",
+        )
+        mgmt_server = uvicorn.Server(mgmt_config)
+
     try:
-        await uvicorn_server.serve()
+        if mgmt_server is not None:
+            async with anyio.create_task_group() as inner_tg:
+                inner_tg.start_soon(uvicorn_server.serve)
+                inner_tg.start_soon(mgmt_server.serve)
+        else:
+            await uvicorn_server.serve()
     finally:
         # Close token stores on shutdown (no-op for InMemoryTokenStore).
         for _ts in token_stores:
