@@ -84,8 +84,7 @@ class TokenCache:
     def invalidate(self) -> None:
         """Force the next call to get_or_refresh() to fetch a new token.
 
-        Useful for handling 401 responses from the upstream: call invalidate()
-        and retry the request once to get a fresh token.
-        Not currently called automatically — reserved for v1.2 retry logic.
+        Called by ``AuthInjector.invalidate_cached_tokens()`` when the upstream
+        returns HTTP 401, so the dispatcher can retry with a freshly-fetched token.
         """
         self._token = None
