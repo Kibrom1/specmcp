@@ -1132,3 +1132,135 @@ async def test_run_http_closes_stores_when_uvicorn_raises():
         assert len(open_calls) == 1, "store.open() must have been called before serve"
     finally:
         os.unlink(cfg_path)
+
+
+# ---------------------------------------------------------------------------
+# _handle_sse: tokens are purged from the store on SSE disconnect
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handle_sse_deletes_session_tokens_on_disconnect():
+    """When an SSE connection closes, any OAuth tokens for that session must be
+    deleted from the token store so abandoned sessions don't accumulate tokens.
+
+    Strategy: capture the Starlette main-app from uvicorn.Config, then have
+    the mocked uvicorn.Server.serve() actually invoke the /sse route handler with
+    a fake Request so _handle_sse's finally block fires and delete() is called.
+    """
+    import textwrap, tempfile, os
+    from contextlib import asynccontextmanager
+    from starlette.requests import Request
+    from specmcp.cli.serve import _run_http
+    from specmcp.config import Config, DispatchConfig
+    from specmcp.runtime.registry_ref import RegistryRef
+    from specmcp.auth.token_store import InMemoryTokenStore
+
+    cfg_yaml = textwrap.dedent("""\
+        version: "2"
+        spec:
+          source: ./spec.json
+        auth:
+          myOAuth:
+            type: oauth2_authorization_code
+            authorization_url: https://auth.example.com/authorize
+            token_url: https://auth.example.com/token
+            client_id_from: env(TEST_CLIENT_ID)
+            client_secret_from: env(TEST_CLIENT_SECRET)
+            redirect_uri: http://localhost:8765/auth/callback
+    """)
+    with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+        f.write(cfg_yaml)
+        cfg_path = f.name
+
+    try:
+        with patch.dict(os.environ, {
+            "TEST_CLIENT_ID": "cid",
+            "TEST_CLIENT_SECRET": "csec",
+        }):
+            cfg = Config.load(Path(cfg_path))
+
+        registry = _make_registry_with_one_tool()
+        registry_ref = RegistryRef(registry)
+        injector = AuthInjector.build(cfg)
+        dispatch_cfg = DispatchConfig()
+
+        # Track delete() calls on any InMemoryTokenStore instance.
+        delete_calls: list[str] = []
+        original_delete = InMemoryTokenStore.delete
+
+        async def _tracking_delete(self, session_id: str) -> None:
+            delete_calls.append(session_id)
+            return await original_delete(self, session_id)
+
+        # Capture the Starlette app for the main port so the fake serve can
+        # invoke _handle_sse directly without a real HTTP server.
+        captured_main_app: list = []
+        server_call_count = [0]
+
+        def _fake_Config(app, host, port, log_level="warning"):
+            if port != 8766:  # not the management app
+                captured_main_app.append(app)
+            return MagicMock()
+
+        # The mocked uvicorn Server: first instance (main app) invokes /sse;
+        # second instance (mgmt app) is a no-op.
+        @asynccontextmanager
+        async def _fake_connect_sse(*args, **kwargs):
+            yield AsyncMock(), AsyncMock()
+
+        async def _fake_server_run_noop(self, read, write, opts):
+            pass  # immediate clean disconnect
+
+        async def _main_serve():
+            if not captured_main_app:
+                return
+            app = captured_main_app[0]
+            sse_handler = next(
+                (r.endpoint for r in app.routes if getattr(r, "path", None) == "/sse"),
+                None,
+            )
+            if sse_handler is None:
+                return
+            # Build a minimal Starlette Request and invoke the handler.
+            scope = {
+                "type": "http", "method": "GET", "path": "/sse",
+                "query_string": b"", "headers": [], "app": app,
+            }
+
+            async def _recv():
+                return {}
+
+            async def _send(msg):
+                pass
+
+            request = Request(scope, receive=_recv, send=_send)
+            await sse_handler(request)
+
+        async def _mgmt_serve():
+            pass  # management server: no-op
+
+        def _fake_Server(config):
+            server_call_count[0] += 1
+            if server_call_count[0] == 1:
+                return AsyncMock(serve=AsyncMock(side_effect=_main_serve))
+            return AsyncMock(serve=AsyncMock(side_effect=_mgmt_serve))
+
+        with patch.dict(os.environ, {"TEST_CLIENT_ID": "cid", "TEST_CLIENT_SECRET": "csec"}), \
+             patch.object(InMemoryTokenStore, "delete", _tracking_delete), \
+             patch("mcp.server.sse.SseServerTransport.connect_sse",
+                   return_value=_fake_connect_sse()), \
+             patch("mcp.server.Server.run", new=_fake_server_run_noop), \
+             patch("uvicorn.Config", side_effect=_fake_Config), \
+             patch("uvicorn.Server", side_effect=_fake_Server):
+            from specmcp.runtime.http_client import HttpClient
+            async with HttpClient(dispatch_cfg) as http_client:
+                await _run_http(registry_ref, http_client, injector, dispatch_cfg, cfg)
+
+        # delete() must have been called once (one scheme, one session).
+        assert len(delete_calls) >= 1, (
+            "InMemoryTokenStore.delete() should be called on SSE disconnect "
+            "to purge session tokens, but it was not called"
+        )
+    finally:
+        os.unlink(cfg_path)

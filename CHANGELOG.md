@@ -81,7 +81,8 @@ port 8765 and `localhost`.
 
 **OAuth management endpoints** (HTTP transport only)
 
-Three Starlette routes mounted under `/auth/`:
+Four routes for the OAuth lifecycle (public routes on the main app; management on
+a dedicated port — see [1.3.0]):
 
 | Route | Purpose |
 |---|---|
@@ -109,10 +110,9 @@ endpoint to loopback addresses only. `--management-bind all` opens it to all
 interfaces and requires a Bearer token (set via `management.management_token_from`
 in config).
 
-`--management-port` is accepted and stored in config but currently has no routing
-effect — management routes run on the main HTTP transport port. This will be wired
-to a dedicated listener in a future release. A warning is emitted to stderr when
-the flag is explicitly passed.
+`--management-port` sets the port for the dedicated management listener (default
+8766). See [1.3.0] for the two-listener architecture that routes this endpoint to
+its own Starlette app.
 
 **`scripts/token_store_rotate.py`** — key rotation utility
 

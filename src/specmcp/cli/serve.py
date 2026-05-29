@@ -18,10 +18,12 @@ lifetime, giving connection pooling across tool calls.
   the auth section of mcp.config.yaml require a server restart.
 
 HTTP transport:
-  When --transport http is passed, a Starlette ASGI app is started with uvicorn.
-  MCP is served over SSE at GET /sse and POST /messages.
-  Each HTTP connection gets its own SessionContext (supporting per-session auth).
-  OAuth callback routes (/auth/*) are mounted on the same app in Phase 4.
+  When --transport http is passed, two Starlette ASGI apps are started with uvicorn:
+    Main app (default port 8765): GET /sse, POST /messages, and public OAuth
+      routes (/auth/login, /auth/callback, /auth/status) when auth code schemes
+      are configured.
+    Management app (default port 8766): DELETE /auth/session/<id> only, bound
+      to loopback by default so it is not reachable from outside the host.
 """
 
 from __future__ import annotations
@@ -618,15 +620,17 @@ async def _run_http(
     Each SSE connection spawns its own MCP Server instance and SessionContext
     so that per-session state (auth tokens, etc.) is isolated.
 
-    Routes (always present):
+    Main app routes (always present on cfg.transport.http.port, default 8765):
       GET  /sse      — SSE stream; client subscribes here to receive MCP messages
       POST /messages — client POSTs MCP requests here (session_id in query string)
 
-    Routes (added when oauth2_authorization_code schemes are configured):
-      GET    /auth/login?nonce=<token>    — consume nonce, redirect to upstream IdP
-      GET    /auth/callback?code=&state=  — exchange code for tokens, show success page
-      GET    /auth/status?session=<id>    — poll: {"authenticated": true|false}
-      DELETE /auth/session/<id>           — revoke tokens (management endpoint)
+    Main app routes (added when oauth2_authorization_code schemes are configured):
+      GET  /auth/login?nonce=<token>    — consume nonce, redirect to upstream IdP
+      GET  /auth/callback?code=&state=  — exchange code for tokens, show success page
+      GET  /auth/status?session=<id>    — poll: {"authenticated": true|false}
+
+    Management app routes (cfg.management.port, default 8766; loopback-only by default):
+      DELETE /auth/session/<id>  — revoke/delete a session's stored tokens
     """
     import uvicorn
     from mcp.server.sse import SseServerTransport
@@ -755,6 +759,14 @@ async def _run_http(
                 await conn_server.run(read_stream, write_stream, init_options)
         finally:
             _sessions.pop(session.session_id, None)
+            # Best-effort: purge this session's OAuth tokens from every scheme's
+            # token store so abandoned sessions don't accumulate tokens indefinitely.
+            # Errors are swallowed — a failure here must not mask the original cause.
+            for _ts in token_stores:
+                try:
+                    await _ts.delete(session.session_id)
+                except Exception:
+                    pass
 
     # Mount public OAuth routes (login / callback / status) on the main app.
     # Management routes (DELETE /auth/session/<id>) run on a separate port.
