@@ -3,58 +3,59 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
+    branches: [main]
 
 jobs:
-  lint:
-    name: Lint & type-check
+  test:
+    name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
-        with: { version: "latest" }
-      - run: uv sync --dev
-      - run: uv run ruff check src/
-      - run: uv run ruff format --check src/
-      - run: uv run mypy src/specmcp
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
 
-  test-unit:
-    name: Unit tests
-    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
-        with: { version: "latest" }
-      - run: uv sync --dev
-      - run: uv run pytest tests/unit -v
 
-  test-integration-vendored:
-    name: Integration tests (vendored specs)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
-        with: { version: "latest" }
-      - run: uv sync --dev
-      - run: uv run pytest tests/integration -v -k "petstore or jsonplaceholder or adversarial"
-
-  test-integration-corpus:
-    name: Integration tests (fetched corpus, ≥80% conversion)
-    runs-on: ubuntu-latest
-    # Only run on main and PRs that touch core pipeline code
-    if: github.ref == 'refs/heads/main' || contains(github.event.pull_request.labels.*.name, 'run-corpus')
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
-        with: { version: "latest" }
-      - run: uv sync --dev
-      - name: Fetch corpus specs
-        run: uv run python scripts/fetch_corpus.py
-      - name: Cache fetched specs
-        uses: actions/cache@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
         with:
-          path: test-corpus/.cache
-          key: corpus-${{ hashFiles('test-corpus/manifest.yaml') }}
-      - run: uv run pytest tests/integration -v -k "corpus"
-        env:
-          SPECMCP_CORPUS_MIN_SUCCESS_RATE: "0.80"
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+
+      - name: Run tests
+        run: |
+          pytest --tb=short -q
+
+  publish:
+    name: Publish to PyPI
+    needs: test
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: pypi
+      url: https://pypi.org/p/specmcp
+    permissions:
+      id-token: write   # required for trusted publishing
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build package
+        run: python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

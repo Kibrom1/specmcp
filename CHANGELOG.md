@@ -5,7 +5,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [1.3.0] — unreleased
+## [1.3.0] — 2026-05-28
 
 ### Added
 
@@ -39,7 +39,7 @@ warning previously emitted at startup has been removed).
 
 ---
 
-## [1.2.0] — unreleased
+## [1.2.0] — 2026-05-28
 
 ### Added
 
@@ -166,7 +166,7 @@ python scripts/token_store_rotate.py \
 
 ---
 
-## [1.1.0] — unreleased
+## [1.1.0] — 2026-05-28
 
 ### Added
 
