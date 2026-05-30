@@ -68,3 +68,13 @@ mcp.config.local.yaml
 # AI assistant instructions (local only)
 CLAUDE.md
 .claude/
+
+# Internal design / planning docs (local reference only)
+docs/security-review.md
+docs/oauth-design-v2.md
+docs/implementation-plan-v1.md
+docs/api-to-mcp-design-v1.md
+docs/api-to-mcp-requirements.md
+docs/feature-gap-plan-v1.1.md
+docs/oauth-implementation-plan.md
+docs/conversion-process.md
