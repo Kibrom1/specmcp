@@ -228,6 +228,7 @@ def _output_json(
         "spec": spec_source,
         "openapi_version": openapi_version,
         "tool_count": len(registry.tools),
+        "hidden_count": len(simplified_ops) - len(registry.tools),
         "fallback_count": sum(
             1 for sop in simplified_ops
             if any(w.kind == "fallback_to_freeform" for w in sop.warnings)

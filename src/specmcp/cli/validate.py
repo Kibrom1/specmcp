@@ -105,26 +105,65 @@ def validate_cmd(
         _emit_error(exc, json_output)
         raise typer.Exit(exit_code_for(exc))
 
-    # 4. Check auth env vars (warn if missing, don't exit — validate is informational)
+    # 4. Simplify + expose to get tool count
+    from specmcp.config import SimplifyConfig
+    from specmcp.core.expose import ToolRegistry
+    from specmcp.core.simplify import simplify
+
+    simplify_cfg = cfg.simplify if cfg else SimplifyConfig()
+    simplified_ops = simplify(ops, config=simplify_cfg)
+    registry = ToolRegistry.build(simplified_ops, config=cfg)
+    tool_count = len(registry.tools)
+    hidden_count = len(ops) - tool_count
+
+    fallback_count = sum(
+        1 for sop in simplified_ops
+        if any(w.kind == "fallback_to_freeform" for w in sop.warnings)
+    )
+    simplify_warning_count = sum(len(sop.warnings) for sop in simplified_ops)
+
+    # 5. Check auth env vars (warn if missing, don't exit — validate is informational)
     if cfg and cfg.auth:
         try:
             cfg.resolve_auth_values()
         except SpecmcpError as exc:
             warnings.append(f"Auth warning: {exc.message}")
 
-    # 5. Report
+    # Detect auth scheme names + types from spec
+    security_schemes = resolved.data.get("components", {}).get("securitySchemes", {})
+    auth_scheme_summary = [
+        f"{name} ({defn.get('type', '?')})"
+        for name, defn in security_schemes.items()
+    ]
+
+    # 6. Report
     if json_output:
         typer.echo(json.dumps({
             "status": "ok",
             "spec": spec_source,
             "openapi_version": resolved.openapi_version,
             "operation_count": len(ops),
+            "tool_count": tool_count,
+            "hidden_count": hidden_count,
+            "fallback_count": fallback_count,
+            "simplify_warning_count": simplify_warning_count,
+            "auth_schemes": list(security_schemes.keys()),
             "warnings": warnings,
         }, indent=2))
     else:
         typer.echo(f"✓ Spec valid: {spec_source}")
         typer.echo(f"  OpenAPI version : {resolved.openapi_version}")
         typer.echo(f"  Operations found: {len(ops)}")
+        typer.echo(
+            f"  Tools exposed   : {tool_count}"
+            + (f"  ({hidden_count} hidden)" if hidden_count else "")
+        )
+        if fallback_count:
+            typer.echo(f"  Fallback schemas: {fallback_count}  (freeform JSON — consider refining those operations)")
+        if simplify_warning_count and verbose:
+            typer.echo(f"  Simplify warnings: {simplify_warning_count}  (run 'specmcp inspect -v' to see them)")
+        if auth_scheme_summary:
+            typer.echo(f"  Auth schemes    : {', '.join(auth_scheme_summary)}")
         for w in warnings:
             typer.echo(f"  ⚠  {w}", err=True)
 

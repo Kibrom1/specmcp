@@ -200,5 +200,16 @@ def _emit(report: dict[str, Any], output: Path | None) -> None:
     if output:
         output.write_text(text, encoding="utf-8")
         typer.echo(f"Report written to {output}", err=True)
+        typer.echo(
+            "Paste the contents of that file into a GitHub issue at:\n"
+            "  https://github.com/specmcp/specmcp/issues/new",
+            err=True,
+        )
     else:
         typer.echo(text)
+        typer.echo(
+            "\nPaste the JSON above into a GitHub issue at:\n"
+            "  https://github.com/specmcp/specmcp/issues/new\n"
+            "Tip: use --output report.json to save it to a file instead.",
+            err=True,
+        )

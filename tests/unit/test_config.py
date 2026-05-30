@@ -276,12 +276,13 @@ def test_scaffold_with_bearer_scheme():
 
 
 def test_scaffold_oauth2_scheme_emits_client_credentials_block():
-    """oauth2 type is now supported — scaffold emits a full oauth2_client_credentials block."""
+    """oauth2_client_credentials type emits a full client credentials block."""
     yaml_str = Config.scaffold(
         spec_source="./spec.json",
         auth_schemes=[{
             "name": "oauth2Flow",
-            "type": "oauth2",
+            "type": "oauth2_client_credentials",
+            "token_url": "https://auth.example.com/oauth/token",
         }],
     )
     assert "oauth2Flow:" in yaml_str
@@ -290,19 +291,54 @@ def test_scaffold_oauth2_scheme_emits_client_credentials_block():
     assert "client_secret_from: env(OAUTH2_FLOW_CLIENT_SECRET)" in yaml_str
 
 
+def test_scaffold_oauth2_authorization_code_block():
+    """oauth2_authorization_code type emits a full auth code block with version: 2."""
+    yaml_str = Config.scaffold(
+        spec_source="./spec.json",
+        auth_schemes=[{
+            "name": "myAuth",
+            "type": "oauth2_authorization_code",
+            "authorization_url": "https://auth.example.com/oauth/authorize",
+            "token_url": "https://auth.example.com/oauth/token",
+            "scopes": ["read", "write"],
+        }],
+    )
+    assert 'version: "2"' in yaml_str
+    assert "myAuth:" in yaml_str
+    assert "type: oauth2_authorization_code" in yaml_str
+    assert "authorization_url: https://auth.example.com/oauth/authorize" in yaml_str
+    assert "token_url: https://auth.example.com/oauth/token" in yaml_str
+    assert "redirect_uri: http://localhost:8765/auth/callback" in yaml_str
+    assert "client_id_from: env(MY_AUTH_CLIENT_ID)" in yaml_str
+    assert "client_secret_from: env(MY_AUTH_CLIENT_SECRET)" in yaml_str
+    assert '"read"' in yaml_str
+    assert '"write"' in yaml_str
+
+
 def test_scaffold_oauth2_scheme_my_oauth_env_var_names():
     """myOAuth → MY_OAUTH (not MY_O_AUTH) — single uppercase before title word is kept."""
     yaml_str = Config.scaffold(
         spec_source="./spec.json",
         auth_schemes=[{
             "name": "myOAuth",
-            "type": "oauth2",
+            "type": "oauth2_client_credentials",
+            "token_url": "https://auth.example.com/oauth/token",
         }],
     )
     assert "client_id_from: env(MY_OAUTH_CLIENT_ID)" in yaml_str
     assert "client_secret_from: env(MY_OAUTH_CLIENT_SECRET)" in yaml_str
     # Ensure the old buggy form is absent
     assert "MY_O_AUTH" not in yaml_str
+
+
+def test_scaffold_non_auth_code_scheme_emits_version_1():
+    """When no auth code schemes are present, version: 1 is emitted."""
+    yaml_str = Config.scaffold(
+        spec_source="./spec.json",
+        auth_schemes=[{"name": "apiKey", "type": "apiKey", "in": "header", "header_name": "X-Api-Key"}],
+    )
+    assert 'version: "1"' in yaml_str
+    assert 'version: "2"' not in yaml_str
 
 
 def test_scaffold_includes_streaming_fields():

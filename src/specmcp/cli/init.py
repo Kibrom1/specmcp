@@ -84,9 +84,9 @@ def init_cmd(
         scheme_type = scheme_def.get("type", "")
         from specmcp.config import scheme_name_to_env_var
         env_var = scheme_name_to_env_var(scheme_name)
-        env_vars.append(env_var)
 
         if scheme_type == "apiKey":
+            env_vars.append(env_var)
             auth_scheme_list.append({
                 "name": scheme_name,
                 "type": "apiKey",
@@ -94,13 +94,51 @@ def init_cmd(
                 "header_name": scheme_def.get("name", "X-Api-Key"),
             })
         elif scheme_type == "http" and scheme_def.get("scheme", "").lower() == "bearer":
+            env_vars.append(env_var)
             auth_scheme_list.append({
                 "name": scheme_name,
                 "type": "http",
                 "scheme": "bearer",
             })
+        elif scheme_type == "oauth2":
+            # Inspect flows to determine the best specmcp auth type.
+            # Priority: authorizationCode > clientCredentials > implicit/password (unsupported)
+            flows = scheme_def.get("flows", {})
+            client_id_var = f"{env_var}_CLIENT_ID"
+            client_secret_var = f"{env_var}_CLIENT_SECRET"
+            env_vars.extend([client_id_var, client_secret_var])
+
+            if "authorizationCode" in flows:
+                flow = flows["authorizationCode"]
+                auth_scheme_list.append({
+                    "name": scheme_name,
+                    "type": "oauth2_authorization_code",
+                    "authorization_url": flow.get(
+                        "authorizationUrl", "https://auth.example.com/oauth/authorize"
+                    ),
+                    "token_url": flow.get(
+                        "tokenUrl", "https://auth.example.com/oauth/token"
+                    ),
+                    "scopes": list(flow.get("scopes", {}).keys()),
+                })
+            elif "clientCredentials" in flows:
+                flow = flows["clientCredentials"]
+                auth_scheme_list.append({
+                    "name": scheme_name,
+                    "type": "oauth2_client_credentials",
+                    "token_url": flow.get(
+                        "tokenUrl", "https://auth.example.com/oauth/token"
+                    ),
+                    "scopes": list(flow.get("scopes", {}).keys()),
+                })
+            else:
+                # implicit / password — not supported; emit commented stub
+                auth_scheme_list.append({
+                    "name": scheme_name,
+                    "type": scheme_type,  # will be commented out by scaffold
+                })
         else:
-            # Unsupported — will be commented out in scaffold
+            # Unsupported scheme type — will be commented out in scaffold
             auth_scheme_list.append({
                 "name": scheme_name,
                 "type": scheme_type,
@@ -122,9 +160,11 @@ def init_cmd(
     env_example_path.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
 
     # Print summary
+    _supported_types = {"apiKey", "http", "oauth2_client_credentials", "oauth2_authorization_code"}
     n_supported = sum(
         1 for s in auth_scheme_list
-        if s.get("type") in ("apiKey",) or (s.get("type") == "http" and s.get("scheme") == "bearer")
+        if s.get("type") in _supported_types
+        or (s.get("type") == "http" and s.get("scheme") == "bearer")
     )
     n_unsupported = len(auth_scheme_list) - n_supported
 

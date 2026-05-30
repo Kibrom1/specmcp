@@ -3,6 +3,7 @@
   '''
   {
     "fallback_count": 0,
+    "hidden_count": 0,
     "openapi_version": "3.0",
     "spec": "test-corpus/petstore.json",
     "tool_count": 4,

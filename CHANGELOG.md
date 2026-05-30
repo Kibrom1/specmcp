@@ -5,6 +5,41 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **`specmcp init` OAuth2 scaffold** — `init` now correctly inspects the spec's
+  `flows` field to distinguish `oauth2_authorization_code` from
+  `oauth2_client_credentials` schemes (previously both fell through to an
+  unsupported-type commented stub). Env-var names are now generated as
+  `SCHEME_CLIENT_ID` / `SCHEME_CLIENT_SECRET` for all OAuth2 schemes.
+  `Config.scaffold()` emits a full YAML block for each type, and outputs
+  `version: "2"` when any authorization-code scheme is present.
+
+### Added
+
+- **`specmcp validate` tool count** — `validate` now runs the full pipeline
+  (load → normalize → simplify → expose) and reports `Tools exposed: N`
+  alongside `Operations found: N`. The `--json` output gains `tool_count`,
+  `hidden_count`, `fallback_count`, `simplify_warning_count`, and
+  `auth_schemes` fields.
+- **`specmcp inspect --json` `hidden_count`** — the `--json` output now
+  includes a `hidden_count` field (operations filtered out by config) to
+  match the human-readable summary.
+- **`specmcp report-issue` filing hint** — the command now prints the GitHub
+  issues URL to stderr after emitting the JSON report, making it easier to
+  file issues without reading the docs.
+- **Nightly integration test** — `tests/integration/test_petstore_nightly.py`
+  fetches the live Petstore spec and asserts pipeline invariants (tool count,
+  unique names, valid schemas). Runs automatically via the new
+  `.github/workflows/nightly.yml` workflow (03:00 UTC daily) and can be
+  triggered manually or locally with `SPECMCP_NIGHTLY=1`.
+- **`CONTRIBUTING.md`** — developer guide covering setup, testing, code style,
+  how to add auth scheme types and CLI commands, and the PR checklist.
+
+---
+
 ## [1.3.0] — 2026-05-28
 
 ### Added
