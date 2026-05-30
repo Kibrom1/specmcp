@@ -35,7 +35,7 @@ pytest tests/unit/
 pytest tests/integration/
 
 # Full suite including slow corpus tests
-pytest --run-corpus
+pytest -m corpus
 
 # A specific test file
 pytest tests/unit/runtime/test_oauth_handler.py -v
@@ -73,7 +73,7 @@ src/specmcp/
 └── errors.py     — SpecmcpError hierarchy
 ```
 
-See [CLAUDE.md](CLAUDE.md) for a deeper map including data flow and key design contracts.
+See the inline docstrings in each module for data flow details and key design contracts.
 
 ---
 
