@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "specmcp"
-version = "1.3.0"
+version = "1.4.0"
 description = "Convert any OpenAPI spec into a working MCP server — no code required."
 readme = "README.md"
 license = { text = "Apache-2.0" }

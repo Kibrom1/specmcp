@@ -287,23 +287,9 @@ specmcp serve --config examples/github/mcp.config.yaml
 
 ## How it works
 
-specmcp runs a pipeline once at startup:
+Point specmcp at any OpenAPI spec and it instantly becomes an MCP server. Every operation in the spec becomes a callable tool — with a name, description, and typed arguments that the LLM can use directly.
 
-```
-Load spec (prance / OpenAPI 3.x resolver)
-  → Normalize   (canonical Operation list)
-  → Simplify    (LLM-friendly descriptions + argument maps)
-  → Expose      (ToolRegistry: name → ToolDefinition)
-```
-
-At runtime, each `tools/call` request:
-
-1. Looks up the tool in the `ToolRegistry`
-2. Injects auth headers/params (API key, bearer token, or OAuth access token)
-3. Builds the upstream HTTP request from the LLM's arguments
-4. Returns the response body as MCP text content
-
-No code generation. The spec is the source of truth.
+specmcp handles all the translation automatically: it reads the spec, builds the tools, injects your credentials, and proxies calls to the real upstream API. No code generation, no wrappers to maintain. When the spec changes, restart specmcp (or use `--watch`) and the tools update automatically.
 
 ---
 
