@@ -672,10 +672,12 @@ async def test_run_http_no_oauth_routes_without_auth_code_scheme():
 
 def test_serve_help_includes_management_flags():
     """--management-port and --management-bind must appear in serve --help."""
+    import re
     r = runner.invoke(app, ["serve", "--help"])
     assert r.exit_code == 0
-    assert "--management-port" in r.output
-    assert "--management-bind" in r.output
+    output = re.sub(r"\x1b\[[0-9;]*m", "", r.output)
+    assert "--management-port" in output
+    assert "--management-bind" in output
 
 
 def test_management_bind_invalid_value_exits_nonzero():
@@ -805,11 +807,13 @@ def test_management_bind_all_without_token_exits_nonzero():
 
 def test_serve_help_includes_token_store_flags():
     """--token-store, --token-store-path, and --token-store-key-env appear in help."""
+    import re
     r = runner.invoke(app, ["serve", "--help"])
     assert r.exit_code == 0
-    assert "--token-store" in r.output
-    assert "--token-store-path" in r.output
-    assert "--token-store-key-env" in r.output
+    output = re.sub(r"\x1b\[[0-9;]*m", "", r.output)
+    assert "--token-store" in output
+    assert "--token-store-path" in output
+    assert "--token-store-key-env" in output
 
 
 def test_token_store_invalid_value_exits_nonzero():
