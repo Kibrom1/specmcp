@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [1.4.1] — 2026-06-02
+
+### Fixed
+
+- **PyPI package name** — published as `mcp-from-spec` (install with `pip install mcp-from-spec`). The `specmcp` CLI command is unchanged.
+- **Version detection** — `specmcp --version` now correctly reads version from `mcp-from-spec` package metadata.
+- **Nightly test guard** — nightly integration tests now only run when `SPECMCP_NIGHTLY=1` is explicitly set, not on every CI push.
+- **`--help` ANSI output** — `serve --help` tests now strip ANSI escape codes before asserting flag names.
+- **`asyncio.run()` in test** — replaced deprecated `asyncio.get_event_loop().run_until_complete()` with `asyncio.run()` for Python 3.10+ compatibility.
+
+---
+
 ## [1.4.0] — 2026-05-30
 
 ### Fixed
