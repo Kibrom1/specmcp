@@ -3,7 +3,7 @@
 from importlib.metadata import version, PackageNotFoundError
 
 try:
-    __version__: str = version("specmcp")
+    __version__: str = version("mcp-from-spec")
 except PackageNotFoundError:
     # Package is not installed (e.g. running directly from source tree)
     __version__ = "0.0.0+dev"
