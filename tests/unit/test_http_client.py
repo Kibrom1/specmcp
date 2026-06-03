@@ -258,6 +258,6 @@ def test_request_outside_context_raises():
     client = HttpClient(_cfg())
     import asyncio
     with pytest.raises(RuntimeError, match="context manager"):
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             client.request(method="GET", url=URL, headers={}, params={}, json_body=None)
         )

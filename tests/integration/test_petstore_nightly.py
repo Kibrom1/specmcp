@@ -85,9 +85,9 @@ def test_live_spec_no_pipeline_errors(petstore_pipeline):
     _, ops, simplified_ops, registry = petstore_pipeline
     # Every normalized op should produce exactly one simplified op
     assert len(simplified_ops) == len(ops)
-    # Every simplified op should have a name
+    # Every simplified op's operation should have an id
     for sop in simplified_ops:
-        assert sop.tool_name, f"SimplifiedOperation for {sop.operation.id!r} has no tool_name"
+        assert sop.operation.id, f"SimplifiedOperation has no operation id"
 
 
 def test_live_spec_validate_cli(tmp_path):
