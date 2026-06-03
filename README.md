@@ -13,7 +13,7 @@ specmcp serve --spec https://api.example.com/openapi.json
 ## Install
 
 ```sh
-pip install specmcp
+pip install mcp-from-spec
 ```
 
 Requires Python 3.10+.
