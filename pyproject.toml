@@ -9,7 +9,7 @@ description = "Convert any OpenAPI spec into a working MCP server — no code re
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
-authors = [{ name = "specmcp contributors" }]
+authors = [{ name = "Kibrom", email = "kibmit@gmail.com" }]
 keywords = ["mcp", "openapi", "llm", "agents", "api", "proxy"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -44,11 +44,11 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/specmcp/specmcp"
-Documentation = "https://github.com/specmcp/specmcp/blob/main/README.md"
-Repository = "https://github.com/specmcp/specmcp"
-"Bug Tracker" = "https://github.com/specmcp/specmcp/issues"
-Changelog = "https://github.com/specmcp/specmcp/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/Kibrom1/specmcp"
+Documentation = "https://github.com/Kibrom1/specmcp/blob/main/README.md"
+Repository = "https://github.com/Kibrom1/specmcp"
+"Bug Tracker" = "https://github.com/Kibrom1/specmcp/issues"
+Changelog = "https://github.com/Kibrom1/specmcp/blob/main/CHANGELOG.md"
 
 [project.scripts]
 specmcp = "specmcp.cli:app"
